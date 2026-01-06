@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Environment
+.env
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Data directories (user-specific data)
+input/
+output/
+processing/
+
+# Database files
+*.sqlite
+*.db
+
+# Logs
+*.log
