@@ -3,7 +3,7 @@
 > [!WARNING]
 > **⚠️ WORK IN PROGRESS** - Este proyecto está todavía en desarrollo activo y **no es todavía mínimamente funcional**. Utilízalo bajo tu propio riesgo.
 
-Herramienta para gestionar y analizar tu cartera de inversiones.
+The Global Position is a personal financial analytics tool completely implemented in Python. It acts as a comprehensive investment portfolio tracker that aggregates transaction data from multiple sources, normalizes it, and calculates the historical and current value of assets.
 
 ## 🚀 Instalación
 
