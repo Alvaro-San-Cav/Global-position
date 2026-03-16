@@ -1,436 +1,399 @@
-import pandas as pd
-import os
-import sys
+"""
+loaders.py – Generic data loading for stocks and crypto.
 
-# Ensure we can import from database package in root
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# from database import manager (Removed for CSV migration)
+Stock operations come from:
+  1. Degiro-format CSVs dropped in input/        (broker transactions)
+  2. Custom stock sources defined in sources.json (RSUs, vests, etc.)
+
+Crypto operations come from:
+  1. Exchange CSV exports dropped in input/       (parsed per sources.json)
+
+Everything is normalised and deduplicated before saving.
+"""
+
+import fnmatch
+import os
+
+import pandas as pd
+
 from . import config
 
-INPUT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "input", "Transactions.csv")
-OPERATIONS_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "processing", "operaciones.csv")
+# ─────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────
 
-def load_operations():
-    """Loads operations from processing/operaciones.csv (master database)."""
-    if not os.path.exists(OPERATIONS_DB):
-        # Return empty DF with expected columns if DB doesn't exist yet
-        return pd.DataFrame(columns=["Date", "Product", "ISIN", "Quantity", "Price", "Coin", "Value", "eur", "ticker"])
-    
-    try:
-        df = pd.read_csv(OPERATIONS_DB)
-        
-        # Normalize header: remove leading/trailing spaces
-        df.columns = [c.strip() for c in df.columns]
-        
-        # Ensure expected columns exist
-        expected_cols = ["Date", "Product", "ISIN", "Quantity", "Price", "Coin", "Value", "eur", "ticker"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = None
-        
-        # Ensure Date is datetime
-        df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-        return df.sort_values('Date')
-        
-    except Exception as e:
-        print(f"❌ Error loading CSV: {e}")
-        return pd.DataFrame(columns=["Date", "Product", "ISIN", "Quantity", "Price", "Coin", "Value", "eur", "ticker"])
-
-def clean_eu_float(x):
-    """Converts European number format (1.234,56) to python float (1234.56)."""
-    if pd.isna(x) or str(x).strip() == '':
+def clean_eu_float(x) -> float:
+    """European number format (1.234,56) → float 1234.56."""
+    if pd.isna(x) or str(x).strip() == "":
         return 0.0
-    x_str = str(x)
-    clean_str = x_str.replace('.', '').replace(',', '.')
+    s = str(x).replace('"', '').replace(' ', '')
+    if ',' in s:
+        s = s.replace('.', '').replace(',', '.')
     try:
-        return float(clean_str)
+        return float(s)
     except ValueError:
         return 0.0
 
-def parse_date(date_str):
-    try:
-        from datetime import datetime
-        return datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
-    except:
-        return date_str
 
-def process_new_transactions(df_ops):
+# ─────────────────────────────────────────────────────────────────────────
+# Stock operations  (processing/operaciones.csv)
+# ─────────────────────────────────────────────────────────────────────────
+
+def load_operations() -> pd.DataFrame:
+    """Load the master stock-operations CSV from processing/."""
+    path = config.OPERATIONS_FILE
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=config.OPERATIONS_COLS)
+
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+    for col in config.OPERATIONS_COLS:
+        if col not in df.columns:
+            df[col] = None
+
+    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+    return df.sort_values('Date', kind='mergesort')
+
+
+def process_new_transactions(df_ops: pd.DataFrame) -> pd.DataFrame:
     """
-    Checks for new CSV files in input/ folder (INCLUDING Transactions.csv).
-    Parses them (simulating Degiro/Broker format) and appends valid rows to processing/operaciones.csv.
-    Deletes all processed files including Transactions.csv.
+    Scan input/ for new Degiro-format CSV files, deduplicate against
+    existing df_ops, concatenate, sort and return the updated DF.
+    Processed files are deleted from input/.
+
+    Files matching any custom stock-source pattern or any crypto-source
+    pattern in sources.json are skipped here (they have their own loader).
     """
-    input_dir = os.path.dirname(INPUT_FILE)
+    input_dir = config.INPUT_DIR
     if not os.path.exists(input_dir):
+        print("ℹ️  input/ folder does not exist.")
         return df_ops
 
-    # Identify ALL CSV files in input/ (including Transactions.csv)
-    new_files = [
-        f for f in os.listdir(input_dir) 
-        if f.lower().endswith(".csv")
+    # Patterns to skip (handled by custom loaders)
+    skip_patterns = set()
+    for src in config.load_sources().get("stock_sources", []):
+        skip_patterns.add(src.get("file_pattern", ""))
+    for src in config.load_sources().get("crypto_sources", []):
+        skip_patterns.add(src.get("file_pattern", ""))
+
+    def _should_skip(fname: str) -> bool:
+        for pat in skip_patterns:
+            if pat and fnmatch.fnmatch(fname.lower(), pat.lower()):
+                return True
+        return False
+
+    csv_files = [
+        f for f in os.listdir(input_dir)
+        if f.lower().endswith('.csv') and not _should_skip(f)
     ]
-    
-    if not new_files:
+
+    if not csv_files:
+        print("ℹ️  No new transaction files in input/.")
         return df_ops
 
-    print(f"Indexando {len(new_files)} nuevos ficheros de transacciones...")
-    
-    # Load current "database" from processing/operaciones.csv
-    if os.path.exists(OPERATIONS_DB):
-        df_current = pd.read_csv(OPERATIONS_DB)
-    else:
-        df_current = pd.DataFrame(columns=["Date", "Product", "ISIN", "Quantity", "Price", "Coin", "Value", "eur", "ticker", "order_id"])
+    print(f"📂 Found {len(csv_files)} transaction file(s) in input/...")
+    new_rows: list[pd.Series] = []
 
-    # Ensure columns for appending
-    cols = ["Date", "Product", "ISIN", "Quantity", "Price", "Coin", "Value", "eur", "ticker", "order_id"]
-    for c in cols:
-        if c not in df_current.columns:
-            df_current[c] = None
-
-    new_rows = []
-    
-    for fname in new_files:
+    for fname in csv_files:
         filepath = os.path.join(input_dir, fname)
         try:
             df_new = pd.read_csv(filepath)
-            
-            # NOTEBOOK LOGIC REPLICATION
-            # Renaming columns based on relative position if Headers match partial naming
-            col_names = df_new.columns.tolist()
-            
-            if "Price" in col_names and "Value" in col_names:
-                price_idx = col_names.index("Price")
-                value_idx = col_names.index("Value")
-                
-                # Rename column after 'Price' to 'Coin'
-                if price_idx + 1 < len(col_names):
-                     # Only if it's not already named Coin? Notebook forces rename.
-                     new_col = col_names[price_idx + 1]
-                     df_new.rename(columns={new_col: "Coin"}, inplace=True)
-                     
-                # Rename column after 'Value' to 'eur' (Local Value -> eur?)
-                # Notebook logic: "Renombrar la columna después de 'Value' a 'eur'"
-                if value_idx + 1 < len(col_names):
-                     new_col_val = col_names[value_idx + 1]
-                     df_new.rename(columns={new_col_val: "eur"}, inplace=True)
 
-            # Filter relevant columns
-            cols = ["Date", "Product", "ISIN", "Quantity", "Price", "Coin", "Value", "eur"]
-            
-            # Check availability
-            available_cols = [c for c in cols if c in df_new.columns]
-            
-            if len(available_cols) < 5:
-                # Fallback to previous logic for other formats? 
-                # Or skip?
-                # Let's try to map generic ones if above failed
+            # Column mapping (Degiro quirks) ─────────────────────────────
+            rename_dict: dict[str, str] = {}
+            if 'Value EUR' in df_new.columns:
+                rename_dict['Value EUR'] = 'Value'
+            elif 'Local value' in df_new.columns and 'Value' not in df_new.columns:
+                rename_dict['Local value'] = 'Value'
+            if rename_dict:
+                df_new.rename(columns=rename_dict, inplace=True)
+
+            # Sort by datetime when Time column exists
+            if 'Date' in df_new.columns and 'Time' in df_new.columns:
+                df_new['_dt'] = pd.to_datetime(
+                    df_new['Date'].astype(str) + ' ' + df_new['Time'].astype(str),
+                    dayfirst=True, errors='coerce',
+                )
+                df_new = df_new.sort_values('_dt').drop(columns=['_dt'])
+
+            if 'eur' not in df_new.columns:
+                df_new['eur'] = 'EUR'
+
+            want = ['Date', 'Product', 'ISIN', 'Quantity', 'Price', 'Coin', 'Value', 'eur']
+            required = {'Date', 'Product', 'ISIN', 'Quantity', 'Price', 'Value'}
+
+            if not required.issubset(df_new.columns):
+                # Try positional mapping for raw Degiro 17-column format
                 if len(df_new.columns) >= 17:
-                     # Raw Degiro fallback
-                     pass
+                    raw = pd.DataFrame()
+                    raw['Date']     = df_new.iloc[:, 0]
+                    raw['Product']  = df_new.iloc[:, 2]
+                    raw['ISIN']     = df_new.iloc[:, 3]
+                    raw['Quantity'] = df_new.iloc[:, 6]
+                    raw['Price']    = df_new.iloc[:, 7]
+                    raw['Coin']     = df_new.iloc[:, 8]
+                    raw['Value']    = df_new.iloc[:, 11]
+                    raw['eur']      = 'EUR'
+                    df_new = raw
                 else:
-                    print(f"Skipping {fname}: Columns mismatch. Found: {df_new.columns.tolist()}")
-                    continue
-            
-            # Work on copy
-            if set(["Date", "Product", "ISIN", "Quantity", "Price", "Value"]).issubset(df_new.columns):
-                 df_new_filtered = df_new.copy()
-            else:
-                 # Try Raw Degiro mapping if needed
-                if len(df_new.columns) >= 17:
-                        # Construct from position using the new Transactions.csv mapping
-                        df_new_filtered = pd.DataFrame()
-                        df_new_filtered['Date'] = df_new.iloc[:, 0]
-                        df_new_filtered['Product'] = df_new.iloc[:, 2]
-                        df_new_filtered['ISIN'] = df_new.iloc[:, 3]
-                        df_new_filtered['Quantity'] = df_new.iloc[:, 6]
-                        df_new_filtered['Price'] = df_new.iloc[:, 7]
-                        df_new_filtered['Coin'] = df_new.iloc[:, 8]
-                        df_new_filtered['Value'] = df_new.iloc[:, 11]
-                        df_new_filtered['eur'] = "EUR" # User requested hardcoded "EUR"
-                        
-                        # Order ID for deduplication
-                        if 'Order ID' in df_new.columns:
-                            df_new_filtered['order_id'] = df_new['Order ID']
-                        else:
-                            df_new_filtered['order_id'] = df_new.iloc[:, 16]
-                else:
+                    print(f"  ⚠️ Skipping {fname}: column mismatch {df_new.columns.tolist()}")
                     continue
 
-            # Ensure columns exist
-            for c in ["Coin", "order_id"]:
-                if c not in df_new_filtered.columns:
-                    df_new_filtered[c] = None
-            
-            # Clean and Convert
-            df_new_filtered['Date'] = pd.to_datetime(df_new_filtered['Date'], dayfirst=True, errors='coerce')
-            
-            for col in ['Price', 'Value', 'Quantity']:
-                if col in df_new_filtered.columns:
-                    df_new_filtered[col] = (
-                        df_new_filtered[col]
-                        .astype(str)
-                        .str.replace('"', '', regex=False)
-                        .str.replace(',', '.', regex=False)
-                        .astype(float)
-                    )
+            for c in want:
+                if c not in df_new.columns:
+                    df_new[c] = None
 
-            # Normalize final schema
-            final_ops = []
-            for _, row in df_new_filtered.iterrows():
-                if pd.isna(row['Date']): continue
-                
-                op = {
-                    'Date': row['Date'],
-                    'Product': row.get('Product'),
-                    'ISIN': row.get('ISIN'),
-                    'Quantity': row.get('Quantity'),
-                    'Price': row.get('Price'),
-                    'Coin': row.get('Coin'),
-                    'Value': row.get('Value'),
-                    'eur': row.get('eur'),
-                    'ticker': row.get('ticker') if 'ticker' in row else None,
-                    'order_id': row.get('order_id') if 'order_id' in row else f"manual_{pd.Timestamp.now().timestamp()}_{_}"
-                }
-                final_ops.append(op)
-            
-            if final_ops:
-                # Deduplication against current DB
-                # Notebook uses: drop_duplicates(subset=cols_to_check) ignoring Coin, eur, ticker
-                # We can do the same on the merged DF.
-                new_rows.extend(final_ops)
+            df_f = df_new[want].copy()
+            df_f['Date'] = pd.to_datetime(df_f['Date'], dayfirst=True, errors='coerce')
+            for col in ['Price', 'Value']:
+                df_f[col] = (
+                    df_f[col].astype(str)
+                    .str.replace('"', '', regex=False)
+                    .str.replace(',', '.', regex=False)
+                    .astype(float)
+                )
+            df_f['Quantity'] = pd.to_numeric(df_f['Quantity'], errors='coerce')
 
-            # Delete processed file
-            try:
-                os.remove(filepath)
-                print(f"Procesado y eliminado: {fname}")
-            except Exception as e:
-                print(f"Error deleting {fname}: {e}")
-                
+            # Normalise ops types for dedup comparison
+            df_ops['Date']     = pd.to_datetime(df_ops['Date'], errors='coerce')
+            df_ops['Quantity'] = pd.to_numeric(df_ops['Quantity'], errors='coerce')
+            df_ops['Price']    = pd.to_numeric(df_ops['Price'], errors='coerce')
+
+            for _, row in df_f.iterrows():
+                match = df_ops[
+                    (df_ops['Date'] == row['Date'])
+                    & (df_ops['ISIN'] == row['ISIN'])
+                    & (df_ops['Quantity'] == row['Quantity'])
+                    & (df_ops['Price'] == row['Price'])
+                ]
+                if match.empty:
+                    new_rows.append(row)
+
+            os.remove(filepath)
+            print(f"  ✅ Processed & deleted: {fname}")
+
         except Exception as e:
-            print(f"Error reading {fname}: {e}")
+            print(f"  ❌ Error processing {fname}: {e}")
 
     if new_rows:
-        df_new_entries = pd.DataFrame(new_rows)
-        # normalize columns
-        for c in cols:
-             if c not in df_new_entries.columns:
-                 df_new_entries[c] = None
-        
-        new_count = len(df_new_entries)
-        
-        # Check if there's an existing database to compare against
-        if len(df_current) > 0:
-            # Deduplication: Only add entries that don't already exist in the DB
-            # Compare on: Date, Product, ISIN, Quantity, Price, Value
-            subset_check = ["Date", "Product", "ISIN", "Quantity", "Price", "Value"]
-            
-            # Merge to find duplicates
-            df_merged = df_new_entries.merge(
-                df_current[subset_check].drop_duplicates(),
-                on=subset_check,
-                how='left',
-                indicator=True
-            )
-            
-            # Keep only entries NOT in the existing DB
-            df_unique_new = df_new_entries[df_merged['_merge'] == 'left_only']
-            duplicates_removed = new_count - len(df_unique_new)
-            
-            if duplicates_removed > 0:
-                print(f"ℹ️  Eliminados {duplicates_removed} duplicados (ya existían en operaciones.csv).")
-            
-            # Concat existing + unique new entries
-            df_updated = pd.concat([df_current, df_unique_new[cols]], ignore_index=True)
-            print(f"✅ Se han añadido {len(df_unique_new)} nuevas transacciones.")
-        else:
-            # No existing DB, just use all new entries
-            df_updated = df_new_entries[cols].copy()
-            print(f"✅ Se han añadido {new_count} transacciones (primera carga).")
-        
-        # Return sorted df (ascending date = "mas pronto primero")
-        df_updated['Date'] = pd.to_datetime(df_updated['Date'], errors='coerce')
-        return df_updated.sort_values('Date', ascending=True)
+        df_ops = pd.concat([df_ops, pd.DataFrame(new_rows)], ignore_index=True)
+        df_ops = df_ops.sort_values('Date', kind='mergesort')
+        print(f"🟢 {len(new_rows)} new transaction(s) added.")
+    else:
+        print("ℹ️  All transactions already existed. Nothing added.")
 
     return df_ops
 
-def merge_sap_data(df_ops):
-    """Merges SAP stock data. Adjusted to append to DF in memory, valid for run-time analysis."""
-    # This logic assumes we just want to ADD valid SAP entries to the analysis DF.
-    # We do NOT persist SAP entries to DB here to avoid polluting the persistent 'real' transactions 
-    # unless SAP entries are considered real transactions. 
-    # The original logic just concatenated them.
-    
-    if not os.path.exists(config.SAP_FILE):
+
+def save_operations(df_ops: pd.DataFrame) -> None:
+    """Persist the operations DF to processing/operaciones.csv."""
+    os.makedirs(config.PROCESSING_DIR, exist_ok=True)
+    df_export = df_ops.loc[:, ~df_ops.columns.duplicated()].copy()
+    df_export['eur'] = 'EUR'
+    cols = [c for c in config.OPERATIONS_COLS if c in df_export.columns]
+    df_export[cols].to_csv(config.OPERATIONS_FILE, index=False)
+    print(f"💾 Operations saved → {config.OPERATIONS_FILE}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Custom stock sources  (defined in sources.json → stock_sources)
+# ─────────────────────────────────────────────────────────────────────────
+
+def merge_custom_stock_sources(df_ops: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each enabled stock_source in sources.json, look for matching files
+    in input/, parse them according to column_map + defaults, and append
+    the resulting rows to df_ops (in-memory only, not persisted).
+    """
+    sources = config.get_stock_sources()
+    if not sources:
         return df_ops
 
-    sap_df = pd.read_csv(config.SAP_FILE, parse_dates=["date"])
-    sap_df = sap_df[["date", "available", "strike_price"]].dropna(subset=["available"])
-    sap_df = sap_df[sap_df["available"].astype(str).str.strip() != ""]
-
-    sap_ops = pd.DataFrame({
-        "Date": sap_df["date"],
-        "Product": "SAP SE",
-        "ISIN": "DE0007164600",
-        "Quantity": sap_df["available"],
-        "Price": sap_df["strike_price"],
-        "Coin": "DOL", # Original was USD, but let's check. Assuming USD/DOL.
-        "Value": 0.0,
-        "eur": "EUR",
-        "ticker": "SAP"
-    })
-    
-    # Ensure logic compatibility
-    sap_ops["Coin"] = "USD"
-    
-    # Concatenate
-    df_combined = pd.concat([df_ops, sap_ops], ignore_index=True)
-    return df_combined.sort_values("Date").reset_index(drop=True)
-
-
-# ==================== CRYPTO (BINANCE) FUNCTIONS ====================
-
-CRYPTO_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "processing", "crypto.csv")
-
-def load_crypto_operations():
-    """Loads crypto operations from processing/crypto.csv."""
-    if not os.path.exists(CRYPTO_DB):
-        return pd.DataFrame(columns=["Date", "Product", "Coin", "Quantity", "ticker"])
-    
-    try:
-        df = pd.read_csv(CRYPTO_DB)
-        df.columns = [c.strip() for c in df.columns]
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        return df.sort_values('Date')
-    except Exception as e:
-        print(f"❌ Error loading crypto CSV: {e}")
-        return pd.DataFrame(columns=["Date", "Product", "Coin", "Quantity", "ticker"])
-
-
-def process_binance_transactions(df_crypto=None):
-    """
-    Processes Binance export files from input/ folder.
-    Parses crypto transactions and appends to processing/crypto.csv.
-    Deletes processed input files.
-    
-    Binance export format:
-    "User_ID","UTC_Time","Account","Operation","Coin","Change","Remark"
-    
-    We extract:
-    - Transaction Buy, Binance Convert (positive Change) for crypto coins
-    - Exclude EUR, USDT intermediate conversions
-    """
-    input_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "input")
-    
+    input_dir = config.INPUT_DIR
     if not os.path.exists(input_dir):
-        return df_crypto if df_crypto is not None else load_crypto_operations()
-    
-    # Find Binance CSV files (case insensitive)
-    binance_files = [
-        f for f in os.listdir(input_dir)
-        if f.lower().endswith(".csv") and "binance" in f.lower()
-    ]
-    
-    if not binance_files:
-        print("ℹ️  No Binance files found in input/")
-        return df_crypto if df_crypto is not None else load_crypto_operations()
-    
-    print(f"📥 Processing {len(binance_files)} Binance file(s)...")
-    
-    # Load current crypto DB
-    if os.path.exists(CRYPTO_DB):
-        df_current = pd.read_csv(CRYPTO_DB)
-        df_current['Date'] = pd.to_datetime(df_current['Date'], errors='coerce')
-    else:
-        df_current = pd.DataFrame(columns=["Date", "Product", "Coin", "Quantity", "ticker"])
-    
-    # Crypto coins to track (exclude fiat and stablecoins used as intermediaries)
-    CRYPTO_COINS = {'BTC', 'ETH', 'MEME', 'BONK', 'SOL', 'ADA', 'XRP', 'DOT', 'LINK', 'MATIC', 'AVAX', 'DOGE', 'SHIB'}
-    
-    # Operations that represent actual crypto acquisitions
-    BUY_OPERATIONS = {
-        'Transaction Buy',
-        'Binance Convert',  # Only positive Change values
-        'Deposit',  # Crypto deposits
-        'Crypto Box',  # Rewards
-    }
-    
-    new_rows = []
-    
-    for fname in binance_files:
-        filepath = os.path.join(input_dir, fname)
-        try:
-            df_binance = pd.read_csv(filepath)
-            
-            # Validate expected columns
-            required_cols = ['UTC_Time', 'Operation', 'Coin', 'Change']
-            if not all(c in df_binance.columns for c in required_cols):
-                print(f"⚠️ Skipping {fname}: Missing required columns. Found: {df_binance.columns.tolist()}")
-                continue
-            
-            # Filter for relevant operations
-            for _, row in df_binance.iterrows():
-                operation = str(row.get('Operation', '')).strip()
-                coin = str(row.get('Coin', '')).strip().upper()
-                change = float(row.get('Change', 0))
-                
-                # Only process crypto coins (not fiat/stablecoins)
-                if coin not in CRYPTO_COINS:
-                    continue
-                
-                # Only process buy operations with positive change
-                if operation not in BUY_OPERATIONS:
-                    continue
-                    
-                if change <= 0:
-                    continue
-                
-                # Create standardized record
-                new_rows.append({
-                    'Date': pd.to_datetime(row['UTC_Time'], errors='coerce'),
-                    'Product': coin,  # Use coin as product name
-                    'Coin': coin,
-                    'Quantity': change,
-                    'ticker': f"{coin}-EUR"  # Yahoo Finance crypto ticker format
-                })
-            
-            # Delete processed file
+        return df_ops
+
+    for src in sources:
+        pattern = src.get("file_pattern", "")
+        col_map = src.get("column_map", {})
+        defaults = src.get("defaults", {})
+        name = src.get("name", pattern)
+
+        matched_files = [
+            f for f in os.listdir(input_dir)
+            if fnmatch.fnmatch(f.lower(), pattern.lower())
+        ]
+        if not matched_files:
+            continue
+
+        for fname in matched_files:
+            filepath = os.path.join(input_dir, fname)
             try:
-                os.remove(filepath)
-                print(f"  ✅ Processed and deleted: {fname}")
+                df_src = pd.read_csv(filepath)
+
+                # Build normalised DataFrame using column_map
+                ops: dict[str, object] = {}
+                for target_col, source_col in col_map.items():
+                    if source_col in df_src.columns:
+                        ops[target_col] = df_src[source_col]
+
+                if 'Date' not in ops:
+                    print(f"  ⚠️ Source '{name}': no Date mapping – skipping {fname}")
+                    continue
+
+                df_mapped = pd.DataFrame(ops)
+
+                # Apply defaults for missing columns
+                for col, val in defaults.items():
+                    if col not in df_mapped.columns:
+                        df_mapped[col] = val
+
+                # Ensure standard columns
+                df_mapped['Date'] = pd.to_datetime(df_mapped['Date'], dayfirst=True, errors='coerce')
+                for col in ['Quantity', 'Price', 'Value']:
+                    if col in df_mapped.columns:
+                        df_mapped[col] = pd.to_numeric(df_mapped[col], errors='coerce')
+                if 'eur' not in df_mapped.columns:
+                    df_mapped['eur'] = 'EUR'
+
+                # Drop rows with bad dates
+                df_mapped = df_mapped.dropna(subset=['Date'])
+
+                n = len(df_mapped)
+                df_ops = pd.concat([df_ops, df_mapped], ignore_index=True)
+                print(f"  🟢 {n} rows merged from '{name}' ({fname})")
+
             except Exception as e:
-                print(f"  ⚠️ Error deleting {fname}: {e}")
-                
-        except Exception as e:
-            print(f"  ❌ Error processing {fname}: {e}")
-    
-    if new_rows:
-        df_new = pd.DataFrame(new_rows)
-        
-        # Deduplicate against existing records
-        if len(df_current) > 0:
-            # Create composite key for deduplication
-            df_current['_key'] = df_current['Date'].astype(str) + '_' + df_current['Coin'] + '_' + df_current['Quantity'].astype(str)
-            df_new['_key'] = df_new['Date'].astype(str) + '_' + df_new['Coin'] + '_' + df_new['Quantity'].astype(str)
-            
-            existing_keys = set(df_current['_key'].tolist())
-            df_unique = df_new[~df_new['_key'].isin(existing_keys)].drop(columns=['_key'])
-            df_current = df_current.drop(columns=['_key'])
-            
-            duplicates_removed = len(df_new) - len(df_unique)
-            if duplicates_removed > 0:
-                print(f"ℹ️  Removed {duplicates_removed} duplicate entries.")
-            
-            df_updated = pd.concat([df_current, df_unique], ignore_index=True)
-        else:
-            df_updated = df_new
-        
-        # Sort and save
-        df_updated = df_updated.sort_values('Date', ascending=True)
-        df_updated.to_csv(CRYPTO_DB, index=False)
-        print(f"✅ Saved {len(df_updated)} crypto transactions to processing/crypto.csv")
-        
-        return df_updated
-    
-    return df_current
+                print(f"  ❌ Error loading '{name}' from {fname}: {e}")
+
+    df_ops = df_ops.sort_values('Date', kind='mergesort').reset_index(drop=True)
+    return df_ops
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Crypto operations  (processing/crypto.csv)
+# ─────────────────────────────────────────────────────────────────────────
+
+def load_crypto_operations() -> pd.DataFrame:
+    """Load the crypto operations CSV from processing/."""
+    cols = ['Date', 'Product', 'Coin', 'Quantity', 'ticker']
+    if not os.path.exists(config.CRYPTO_DB):
+        return pd.DataFrame(columns=cols)
+
+    df = pd.read_csv(config.CRYPTO_DB)
+    df.columns = [c.strip() for c in df.columns]
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    return df.sort_values('Date')
+
+
+def process_crypto_transactions() -> pd.DataFrame:
+    """
+    For each enabled crypto_source in sources.json, scan input/ for
+    matching CSV files, parse them according to the source config,
+    deduplicate against the existing crypto DB, and persist.
+
+    Returns the updated crypto DF.
+    """
+    sources = config.get_crypto_sources()
+    df_current = load_crypto_operations()
+
+    if not sources:
+        return df_current
+
+    input_dir = config.INPUT_DIR
+    if not os.path.exists(input_dir):
+        return df_current
+
+    new_rows: list[dict] = []
+
+    for src in sources:
+        pattern        = src.get("file_pattern", "")
+        col_map        = src.get("column_map", {})
+        coins_filter   = set(c.upper() for c in src.get("coins", []))
+        buy_ops        = set(src.get("buy_operations", []))
+        name           = src.get("name", pattern)
+
+        matched = [f for f in os.listdir(input_dir)
+                   if fnmatch.fnmatch(f.lower(), pattern.lower())]
+
+        if not matched:
+            continue
+
+        print(f"📥 Processing '{name}': {len(matched)} file(s)...")
+
+        for fname in matched:
+            filepath = os.path.join(input_dir, fname)
+            try:
+                df_raw = pd.read_csv(filepath)
+
+                # Resolve source column names
+                date_col = col_map.get("Date", "UTC_Time")
+                coin_col = col_map.get("Coin", "Coin")
+                qty_col  = col_map.get("Quantity", "Change")
+                op_col   = col_map.get("Operation", "Operation")
+
+                for _, row in df_raw.iterrows():
+                    coin = str(row.get(coin_col, '')).strip().upper()
+                    change = float(row.get(qty_col, 0))
+
+                    # Coin filter
+                    if coins_filter and coin not in coins_filter:
+                        continue
+
+                    # Operation filter (if column exists)
+                    if op_col in df_raw.columns and buy_ops:
+                        op = str(row.get(op_col, '')).strip()
+                        if op not in buy_ops:
+                            continue
+
+                    # Only positive amounts
+                    if change <= 0:
+                        continue
+
+                    new_rows.append({
+                        'Date':     pd.to_datetime(row.get(date_col), errors='coerce'),
+                        'Product':  coin,
+                        'Coin':     coin,
+                        'Quantity': change,
+                        'ticker':   f"{coin}-EUR",
+                    })
+
+                os.remove(filepath)
+                print(f"  ✅ Processed & deleted: {fname}")
+
+            except Exception as e:
+                print(f"  ❌ Error with {fname}: {e}")
+
+    if not new_rows:
+        print("ℹ️  No new crypto transactions found.")
+        return df_current
+
+    df_new = pd.DataFrame(new_rows)
+
+    # Dedup against existing
+    if len(df_current) > 0:
+        df_current['_key'] = (
+            df_current['Date'].astype(str) + '_'
+            + df_current['Coin'] + '_'
+            + df_current['Quantity'].astype(str)
+        )
+        df_new['_key'] = (
+            df_new['Date'].astype(str) + '_'
+            + df_new['Coin'] + '_'
+            + df_new['Quantity'].astype(str)
+        )
+        existing = set(df_current['_key'])
+        df_unique = df_new[~df_new['_key'].isin(existing)].drop(columns=['_key'])
+        df_current = df_current.drop(columns=['_key'])
+        df_updated = pd.concat([df_current, df_unique], ignore_index=True)
+        n_dup = len(df_new) - len(df_unique)
+        if n_dup > 0:
+            print(f"ℹ️  {n_dup} duplicate(s) skipped.")
+    else:
+        df_updated = df_new
+
+    df_updated = df_updated.sort_values('Date')
+    os.makedirs(config.PROCESSING_DIR, exist_ok=True)
+    df_updated.to_csv(config.CRYPTO_DB, index=False)
+    print(f"💾 {len(df_updated)} crypto transactions saved → {config.CRYPTO_DB}")
+    return df_updated

@@ -3,4 +3,3 @@ numpy
 yfinance
 matplotlib
 seaborn
-fpdf
