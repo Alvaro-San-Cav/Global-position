@@ -26,5 +26,8 @@ processing/
 *.sqlite
 *.db
 
+# Test cache
+.pytest_cache/
+
 # Logs
 *.log

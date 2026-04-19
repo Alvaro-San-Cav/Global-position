@@ -18,7 +18,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from src import config, loaders, market_data, core, reporter
+from src import config, loaders, market_data, core, reporter, tax
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -27,6 +27,13 @@ from src import config, loaders, market_data, core, reporter
 
 def run_analysis():
     print("\n🚀 Starting Global Position Analysis...\n")
+
+    # ── Validate sources.json config ─────────────────────────────────
+    try:
+        config.validate_sources()
+    except ValueError as e:
+        print(f"❌ Error en sources.json: {e}")
+        return
 
     # ── Load stock operations ────────────────────────────────────────
     try:
@@ -145,6 +152,17 @@ def run_analysis():
             print(f"⚠️  Crypto calculation failed: {e}")
             has_crypto = False
 
+    # ── Benchmark comparison ─────────────────────────────────────────
+    benchmark_series = None
+    bm_ticker, bm_name = config.get_benchmark()
+    if bm_ticker:
+        print(f"\n📊 Descargando benchmark ({bm_name}: {bm_ticker})...")
+        benchmark_series, bm_total, bm_annual = core.compute_benchmark_return(
+            bm_ticker, start_date=df_ops['Date'].min()
+        )
+        if not benchmark_series.empty:
+            print(f"   Benchmark {bm_name}: total={bm_total*100:.2f}%  anual={bm_annual*100:.2f}%")
+
     # ── Consolidated metrics (notebook step 9) ───────────────────────
     metrics = _compute_metrics(
         valor_total_cartera, aporte_diario,
@@ -152,6 +170,11 @@ def run_analysis():
         aporte_crypto if has_crypto else None,
         valor_crypto_eur if has_crypto else None,
     )
+    if benchmark_series is not None and not benchmark_series.empty:
+        metrics['benchmark_ticker'] = bm_ticker
+        metrics['benchmark_name']   = bm_name
+        metrics['benchmark_total']  = bm_total * 100
+        metrics['benchmark_annual'] = bm_annual * 100
 
     # ── Print summary to console ─────────────────────────────────────
     _print_summary(metrics, has_crypto)
@@ -167,6 +190,7 @@ def run_analysis():
             valor_crypto_eur=valor_crypto_eur if has_crypto else None,
             metrics=metrics,
             failed_assets_summary=failed_assets_summary if not failed_assets_summary.empty else None,
+            benchmark_series=benchmark_series,
         )
     except Exception as e:
         print(f"❌ Error generating PDF: {e}")
@@ -213,6 +237,63 @@ def process_crypto():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  5. Tax report (FIFO gains/losses)
+# ─────────────────────────────────────────────────────────────────────────
+
+def run_tax_report():
+    print("\n💶 Calculando plusvalías fiscales (FIFO)...\n")
+    try:
+        config.validate_sources()
+    except ValueError as e:
+        print(f"❌ Error en sources.json: {e}")
+        return
+
+    df_ops = loaders.load_operations()
+    if df_ops.empty:
+        print("⚠️  No hay operaciones cargadas.")
+        return
+
+    df_ops = loaders.merge_custom_stock_sources(df_ops)
+    df_ops = market_data.update_tickers_in_operations(df_ops)
+
+    tickers = [t for t in df_ops['ticker'].dropna().unique() if t and str(t).strip()]
+    currencies = df_ops['Coin'].dropna().unique().tolist()
+    start_date = df_ops['Date'].min()
+
+    print("📥 Descargando FX para conversión EUR...")
+    fx_rates = market_data.fetch_fx_rates(currencies, start_date)
+
+    df_adj = core.SplitManager.apply_splits(df_ops)
+    df_gains = tax.calculate_fifo_gains(df_adj, fx_rates)
+
+    if df_gains.empty:
+        print("ℹ️  No hay ventas registradas — sin plusvalías que calcular.")
+        return
+
+    print("\n📊 PLUSVALÍAS FIFO POR AÑO FISCAL")
+    print("=" * 70)
+    annual = tax.annual_tax_summary(df_gains)
+    for _, row in annual.iterrows():
+        sign = "+" if row['plusvalia_total_eur'] >= 0 else ""
+        print(f"\n  {int(row['annyo'])}:")
+        print(f"    Plusvalía total:   {sign}€{row['plusvalia_total_eur']:,.2f}")
+        print(f"    Ganancias:        +€{row['plusvalias_eur']:,.2f}")
+        print(f"    Pérdidas:          €{row['minusvalias_eur']:,.2f}")
+        print(f"    Nº de ventas:      {int(row['n_ventas'])}")
+
+    print("\n\n📋 DETALLE POR OPERACIÓN DE VENTA:")
+    print("=" * 70)
+    cols = ['fecha_venta', 'ticker', 'qty_vendida', 'precio_venta_eur', 'coste_base_eur', 'plusvalia_eur']
+    print(df_gains[cols].to_string(index=False))
+
+    # Export to CSV
+    out_path = os.path.join(config.OUTPUT_DIR, "plusvalias_fifo.csv")
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    df_gains.to_csv(out_path, index=False)
+    print(f"\n💾 Exportado: {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  Metrics computation  (mirrors notebook step 9)
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -233,7 +314,9 @@ def _compute_metrics(valor_total_cartera, aporte_diario,
     cagr_acc  = ((val_acc / cap_acc) ** (1 / anhos_acc) - 1) * 100 \
                 if anhos_acc > 0 and cap_acc > 0 else 0
 
-    twr_acc_t, twr_acc_a = core.compute_twr(valor_total_cartera, aporte_diario)
+    # Use robust mixed timing for dashboard metrics:
+    # contributions at start-of-day, withdrawals at end-of-day.
+    twr_acc_t, twr_acc_a = core.compute_twr(valor_total_cartera, aporte_diario, flow_at='auto')
     m.update(
         capital_aportado_acciones=cap_acc,
         valor_actual_acciones=val_acc,
@@ -260,7 +343,7 @@ def _compute_metrics(valor_total_cartera, aporte_diario,
         cagr_cry  = ((val_cry / cap_cry) ** (1 / anhos_cry) - 1) * 100 \
                     if anhos_cry > 0 and cap_cry > 0 else 0
 
-        twr_cry_t, twr_cry_a = core.compute_twr(valor_total_crypto, aporte_crypto)
+        twr_cry_t, twr_cry_a = core.compute_twr(valor_total_crypto, aporte_crypto, flow_at='auto')
         twr_cry_t *= 100; twr_cry_a *= 100
 
     m.update(
@@ -293,7 +376,7 @@ def _compute_metrics(valor_total_cartera, aporte_diario,
         a_acc  = aporte_diario.reindex(common_idx).ffill().fillna(0)
         a_cry  = aporte_crypto.reindex(common_idx).ffill().fillna(0)
         a_comb = a_acc + a_cry
-        twr_tot_t, twr_tot_a = core.compute_twr(v_comb, a_comb)
+        twr_tot_t, twr_tot_a = core.compute_twr(v_comb, a_comb, flow_at='auto')
     else:
         twr_tot_t, twr_tot_a = twr_acc_t, twr_acc_a
 
@@ -385,7 +468,8 @@ def main():
         print("1. 📊 Run Analysis & Generate Report")
         print("2. 📥 Process New Stock Transactions (from input/)")
         print("3. 🪙 Process Crypto Transactions (from input/)")
-        print("4. 🚪 Exit")
+        print("4. 💶 Tax Report – Plusvalías FIFO")
+        print("5. 🚪 Exit")
 
         choice = input("Select an option: ").strip()
 
@@ -396,6 +480,8 @@ def main():
         elif choice == "3":
             process_crypto()
         elif choice == "4":
+            run_tax_report()
+        elif choice == "5":
             print("Bye!")
             sys.exit()
         else:

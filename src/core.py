@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from . import config
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Date helpers (tz-naive, normalised to midnight)
@@ -109,17 +111,30 @@ class SplitManager:
     # -- orchestrate detection + application --
     @staticmethod
     def apply_splits(df_ops) -> pd.DataFrame:
-        print("🔄 Detecting and applying splits...")
+        log = config.get_logger()
+        print("[*] Detecting and applying splits...")
 
         splits_ops = SplitManager.detect_splits_from_ops(df_ops)
-        print(f"   ✓ {len(splits_ops)} split(s) found in operations")
+        print(f"   [ok] {len(splits_ops)} split(s) found in operations")
+        for s in splits_ops:
+            log.info(
+                f"split detectado (operaciones): ticker={s['ticker']} "
+                f"fecha={s['fecha'].date()} ratio={s['ratio']:.4f}"
+            )
 
         splits_post: list[dict] = []
         for t in df_ops['ticker'].dropna().unique():
             splits_post.extend(SplitManager.detect_post_holding_splits(df_ops, t, splits_ops))
-        print(f"   ✓ {len(splits_post)} post-holding split(s) found via yfinance")
+        print(f"   [ok] {len(splits_post)} post-holding split(s) found via yfinance")
+        for s in splits_post:
+            log.info(
+                f"split detectado (yfinance post-holding): ticker={s['ticker']} "
+                f"fecha={s['fecha'].date()} ratio={s['ratio']:.4f}"
+            )
 
         all_splits = splits_ops + splits_post
+        if not all_splits:
+            log.info("apply_splits: sin splits detectados")
         return SplitManager._apply_factors(df_ops, all_splits)
 
     @staticmethod
@@ -172,11 +187,11 @@ class SplitManager:
         df_adj['Quantity_adj'] = df_adj['Quantity'] * df_adj['adj_factor']
 
         if splits:
-            print(f"\n✅ {len(splits)} split(s) applied:")
+            print(f"\n[+] {len(splits)} split(s) applied:")
             for s in sorted(splits, key=lambda x: (x['ticker'], x['fecha'])):
-                print(f"   • {s['ticker']}: Ratio {s['ratio']:.2f}  ({s['fecha'].date()})")
+                print(f"   - {s['ticker']}: Ratio {s['ratio']:.2f}  ({s['fecha'].date()})")
         else:
-            print("✅ No splits to apply.")
+            print("[+] No splits to apply.")
         return df_adj
 
 
@@ -245,23 +260,38 @@ def calculate_stock_portfolio(df_ops, prices, fx_rates):
     valor_total_cartera = valor_cartera.sum(axis=1)
 
     # ── 5. Capital aportado acumulado ───────────────────────────────────
-    # Net invested = sum of actual cash flows converted to EUR.
-    # Buys  (Qty > 0) → money out of pocket  → +abs(Qty) * price_EUR
-    # Sells (Qty < 0) → money back in pocket → -abs(Qty) * price_EUR
-    # This gives the true net capital committed over time.
-    df_ops['_qty_signed'] = df_ops[qty_col]
-    df_ops['_flow_eur'] = df_ops['_qty_signed'].abs() * df_ops['EST_eur']
-    # Sign: positive Qty = buy = capital out; negative Qty = sell = capital back
-    df_ops['_flow_eur'] = df_ops['_flow_eur'] * df_ops['_qty_signed'].apply(
-        lambda q: 1.0 if q > 0 else (-1.0 if q < 0 else 0.0)
-    )
+    # Prefer broker cash flow (Value) for invested capital. We only use
+    # qty*price*fx as fallback when Value is missing. Optionally, some custom
+    # sources (e.g. SAP vest feeds) can request notebook-like fallback when
+    # Value==0 via sources.json (zero_value_flow_from_est_eur_tickers).
+    raw_qty = pd.to_numeric(df_ops['Quantity'], errors='coerce').fillna(0.0)
+    qty_sign = raw_qty.apply(lambda q: 1.0 if q > 0 else (-1.0 if q < 0 else 0.0))
+
+    value_eur = pd.to_numeric(df_ops.get('Value', np.nan), errors='coerce')
+    flow_from_value = value_eur.abs() * qty_sign
+
+    est_eur = pd.to_numeric(df_ops['EST_eur'], errors='coerce').fillna(0.0)
+    flow_estimated_qty = raw_qty.abs() * est_eur * qty_sign
+    flow_estimated_unit = est_eur * qty_sign
+
+    df_ops['_flow_eur'] = flow_from_value.where(~value_eur.isna(), flow_estimated_qty)
+
+    special_tickers = set(config.get_zero_value_flow_from_est_tickers())
+    if special_tickers and 'ticker' in df_ops.columns:
+        ticker_s = df_ops['ticker'].fillna('').astype(str).str.strip()
+        zero_value_mask = value_eur.eq(0)
+        special_mask = ticker_s.isin(special_tickers)
+        use_unit_est_mask = zero_value_mask & special_mask
+        if use_unit_est_mask.any():
+            df_ops.loc[use_unit_est_mask, '_flow_eur'] = flow_estimated_unit[use_unit_est_mask]
+
     aporte_diario = (
         df_ops.groupby('Date')['_flow_eur']
         .sum()
         .reindex(all_days, fill_value=0)
         .cumsum()
     )
-    df_ops.drop(columns=['_qty_signed', '_flow_eur'], inplace=True, errors='ignore')
+    df_ops.drop(columns=['_flow_eur'], inplace=True, errors='ignore')
 
     return valor_total_cartera, aporte_diario, valor_cartera
 
@@ -355,6 +385,14 @@ def calculate_crypto_portfolio(df_crypto, fx_rates):
         .fillna(0)
     )
 
+    # Start the crypto series when investment actually begins (first positive buy).
+    # This avoids showing a pre-investment flat segment in the dashboard chart.
+    first_investment_date = aporte[aporte > 0].index.min() if not aporte.empty else None
+    if pd.notna(first_investment_date):
+        valor_total_crypto = valor_total_crypto.loc[valor_total_crypto.index >= first_investment_date]
+        aporte = aporte.loc[aporte.index >= first_investment_date]
+        valor_crypto_eur = valor_crypto_eur.loc[valor_crypto_eur.index >= first_investment_date]
+
     return valor_total_crypto, aporte, valor_crypto_eur
 
 
@@ -371,7 +409,10 @@ def compute_twr(values: pd.Series, cum_contribs: pd.Series,
     ----------
     values       : daily portfolio value
     cum_contribs : cumulative contributions (invested capital)
-    flow_at      : 'start' or 'end' (when cash flow enters the portfolio)
+    flow_at      : 'start', 'end' or 'auto' (cash-flow timing assumption)
+                   - start: all flows at period start
+                   - end: all flows at period end
+                   - auto: positive flows at start, negative flows at end
 
     Returns
     -------
@@ -387,17 +428,33 @@ def compute_twr(values: pd.Series, cum_contribs: pd.Series,
         V_prev = vals.iloc[i - 1]
         V_curr = vals.iloc[i]
         CF = net.iloc[i]
+
+        numer = None
         if flow_at == 'start':
             denom = V_prev + CF
-        else:
+            numer = V_curr - V_prev - CF
+        elif flow_at == 'end':
             denom = V_prev
+            numer = V_curr - CF - V_prev
+        elif flow_at == 'auto':
+            # Robust hybrid for daily-close data with unknown intraday timing:
+            # buys/contributions behave like start-of-day flows, while
+            # withdrawals/sales behave like end-of-day flows.
+            if CF >= 0:
+                denom = V_prev + CF
+                numer = V_curr - V_prev - CF
+            else:
+                denom = V_prev
+                numer = V_curr - CF - V_prev
+        else:
+            raise ValueError("flow_at must be 'start', 'end' or 'auto'")
 
         # Skip days where the portfolio barely exists (avoids div-by-tiny)
         if abs(denom) < 1.0:
             continue
 
-        r = (V_curr - V_prev - CF) / denom if flow_at == 'start' \
-            else (V_curr - CF - V_prev) / denom
+        r = numer / denom
+
         # Clamp extreme single-day returns to avoid chain-link blowups
         r = max(min(r, 5.0), -0.99)
         rets.append(r)
@@ -415,6 +472,70 @@ def compute_twr(values: pd.Series, cum_contribs: pd.Series,
         twr_annual = 0.0
 
     return twr_total, twr_annual
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  BENCHMARK COMPARISON
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def compute_benchmark_return(
+    benchmark_ticker: str,
+    start_date,
+    end_date=None,
+) -> tuple[pd.Series, float, float]:
+    """
+    Download benchmark price series and compute its total & annualised return
+    over the same period as the portfolio.
+
+    Returns
+    -------
+    price_series  : pd.Series  – daily close prices (normalised to 100 at start)
+    total_return  : float      – decimal total return (e.g. 0.35 = +35%)
+    annual_return : float      – annualised return (decimal)
+    """
+    if end_date is None:
+        end_date = pd.Timestamp.today().normalize()
+
+    start_date = _to_tznaive_safe(pd.Timestamp(start_date))
+    end_date   = _to_tznaive_safe(pd.Timestamp(end_date))
+
+    try:
+        raw = yf.download(
+            benchmark_ticker,
+            start=start_date.strftime("%Y-%m-%d"),
+            end=(end_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            progress=False,
+            auto_adjust=True,
+        )
+        if raw.empty:
+            return pd.Series(dtype=float), 0.0, 0.0
+
+        close = raw["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close.index = normalize_date_series(close.index)
+        close = close.sort_index().ffill()
+
+        # Reindex to full daily calendar
+        all_days = pd.date_range(close.index.min(), end_date, freq="D")
+        close = close.reindex(all_days).ffill()
+
+        # Normalise to 100 at start
+        start_val = close.iloc[0]
+        if start_val == 0 or pd.isna(start_val):
+            return pd.Series(dtype=float), 0.0, 0.0
+        normalised = close / start_val * 100.0
+
+        total_ret = (close.iloc[-1] / close.iloc[0]) - 1.0
+        days = (close.index[-1] - close.index[0]).days
+        years = days / 365.25 if days > 0 else 1.0
+        annual_ret = (1 + total_ret) ** (1 / years) - 1.0 if years > 0 else 0.0
+
+        return normalised, total_ret, annual_ret
+
+    except Exception as e:
+        print(f"[!] No se pudo descargar benchmark '{benchmark_ticker}': {e}")
+        return pd.Series(dtype=float), 0.0, 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

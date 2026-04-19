@@ -16,6 +16,7 @@ import pytest
 
 # ── Importar módulos del proyecto ──────────────────────────────────────
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from src import config
 from src.core import (
     SplitManager,
     calculate_stock_portfolio,
@@ -209,11 +210,11 @@ class TestStockPortfolio:
         """Capital aportado acumulado al final = sum de flows con signo."""
         df_ops, prices, fx, dates = portfolio_data
         vtc, ad, vc = calculate_stock_portfolio(df_ops, prices, fx)
-        # Day 0: BUY 10 A at 100 USD, FX(USD→EUR)=0.9 → 10*100*0.9 = 900
-        #         BUY 5 B at 200 EUR, FX(EUR→EUR)=1.0 → 5*200*1.0  = 1000
-        # Day 2: BUY 3 A at 110 USD, FX=0.9           → 3*110*0.9 = 297
-        # Total = 900 + 1000 + 297 = 2197
-        expected_total = 10 * 100 * 0.9 + 5 * 200 * 1.0 + 3 * 110 * 0.9
+        # Uses broker cash flow (Value) when present:
+        # Day 0: +1000 (A) +1000 (B)
+        # Day 2: +330  (A)
+        # Total = 2330
+        expected_total = 1000 + 1000 + 330
         assert np.isclose(ad.iloc[-1], expected_total, rtol=0.01)
 
     def test_valor_cartera_has_both_tickers(self, portfolio_data):
@@ -222,6 +223,30 @@ class TestStockPortfolio:
         vtc, ad, vc = calculate_stock_portfolio(df_ops, prices, fx)
         assert "A" in vc.columns
         assert "B" in vc.columns
+
+    def test_aporte_zero_value_uses_notebook_fallback_for_configured_ticker(self, monkeypatch):
+        """Para tickers configurados (p.ej. SAP), Value=0 usa EST_eur como en notebook."""
+        dates = pd.date_range("2024-01-01", periods=3)
+        df_ops = pd.DataFrame({
+            "Date": [dates[0]],
+            "Product": ["SAP SE"],
+            "ISIN": ["DE0007164600"],
+            "Quantity": [10.0],
+            "Price": [100.0],
+            "Coin": ["EUR"],
+            "Value": [0.0],
+            "eur": ["EUR"],
+            "ticker": ["SAP.DE"],
+        })
+        prices = pd.DataFrame({"SAP.DE": [100.0, 101.0, 102.0]}, index=dates)
+        fx = pd.DataFrame({"EUR": [1.0, 1.0, 1.0]}, index=dates)
+
+        monkeypatch.setattr(config, "get_zero_value_flow_from_est_tickers", lambda: ["SAP.DE"])
+
+        _, aporte, _ = calculate_stock_portfolio(df_ops, prices, fx)
+
+        # Notebook-style fallback for SAP rows with Value=0: flow ~= Price*FX (=100)
+        assert np.isclose(aporte.iloc[-1], 100.0, rtol=0.001)
 
 
 # ═══════════════════════════════════════════════════════════════════════

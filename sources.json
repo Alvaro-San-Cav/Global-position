@@ -1,28 +1,29 @@
 {
     "stock_sources": [
         {
-            "name": "SAP Vests (ejemplo)",
-            "enabled": false,
-            "file_pattern": "sap_*.csv",
+            "name": "SAP Vests",
+            "enabled": true,
+            "file_pattern": "sap*.csv",
             "column_map": {
                 "Date": "date",
                 "Quantity": "available",
                 "Price": "strike_price"
             },
+            "compute_value_from_price": false,
             "defaults": {
                 "Product": "SAP SE",
                 "ISIN": "DE0007164600",
-                "Coin": "USD",
-                "Value": 0.0,
-                "ticker": "SAP"
+                "Coin": "EUR",
+                "Value": 0,
+                "ticker": "SAP.DE"
             },
-            "_comment": "Activa esta fuente con enabled=true y coloca los CSV en input/"
+            "_comment": "Formato CSV: date,strike_price,allocated,available. Solo se procesan filas con available>0. compute_value_from_price=true calcula Value=strike_price*available por fila, distribuyendo el capital invertido en cada fecha de vest."
         }
     ],
     "crypto_sources": [
         {
-            "name": "Binance (ejemplo)",
-            "enabled": false,
+            "name": "Binance",
+            "enabled": true,
             "file_pattern": "binance*.csv",
             "column_map": {
                 "Date": "UTC_Time",
@@ -30,6 +31,7 @@
                 "Quantity": "Change",
                 "Operation": "Operation"
             },
+            "enforce_coins_filter": false,
             "coins": [
                 "BTC",
                 "ETH"
@@ -37,10 +39,9 @@
             "buy_operations": [
                 "Transaction Buy",
                 "Binance Convert",
-                "Deposit",
                 "Crypto Box"
             ],
-            "_comment": "Ajusta 'coins' para incluir las criptos que quieras rastrear"
+            "_comment": "Formato CSV: User_ID,UTC_Time,Account,Operation,Coin,Change,Remark. 'Deposit' excluido: es ingreso de EUR fiat, no crypto. 'Buy Crypto With Fiat' excluido: el USDT se convierte inmediatamente via Binance Convert, que ya se captura. Si enforce_coins_filter=true, solo se procesan las monedas de 'coins'."
         }
     ],
     "price_adjustments": {
@@ -52,5 +53,14 @@
         "GBX": 100,
         "_comment": "Divisor aplicado al tipo de cambio. Ej: GBX viene en peniques → ÷100. Añade aquí cualquier moneda que necesite ajuste."
     },
+    "benchmark": {
+        "ticker": "IWDA.AS",
+        "name": "MSCI World (IWDA)",
+        "_comment": "Ticker de yfinance para comparar el rendimiento de la cartera. Alternativas: SPY (S&P 500), QQQ (Nasdaq), VWCE.DE (FTSE All-World). Deja ticker vacío para deshabilitar."
+    },
+    "zero_value_flow_from_est_eur_tickers": [
+        "SAP.DE",
+        "SAP"
+    ],
     "_instructions": "Añade tus propias fuentes de datos aquí. Cada stock_source define un CSV con acciones extra (ej. RSUs, vests). Cada crypto_source define un exchange de crypto. Pon enabled=true para activarlas. price_adjustments y fx_adjustments permiten ajustar precios y tipos de cambio dividiendo por el valor indicado."
 }

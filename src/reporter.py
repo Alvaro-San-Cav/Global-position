@@ -41,6 +41,8 @@ def generate_full_report(
     metrics: dict | None = None,
     # Failed / Missing Data (optional)
     failed_assets_summary: pd.DataFrame | None = None,
+    # Benchmark (optional, normalised series starting at 100)
+    benchmark_series: pd.Series | None = None,
 ) -> str:
     """
     Generate the PDF and return the file path.
@@ -78,7 +80,7 @@ def generate_full_report(
     nombre_pdf = os.path.join(config.OUTPUT_DIR, f"resumen_cartera_{fecha_actual}.pdf")
 
     with PdfPages(nombre_pdf) as pdf:
-        fig = plt.figure(figsize=(11, 14))
+        fig = plt.figure(figsize=(11, 14), facecolor='#d9d9d9')
 
         # ── Decorative lines ─────────────────────────────────────────
         fig.add_artist(Line2D([0, 1], [1, 1], transform=fig.transFigure,
@@ -95,6 +97,17 @@ def generate_full_report(
                  color='#2E86AB', linewidth=2)
         ax1.plot(aporte_diario, label='Capital aportado neto',
                  linestyle='--', color='#A23B72', linewidth=1.5)
+
+        # Benchmark overlay: scale normalised series to capital units
+        has_benchmark = benchmark_series is not None and not benchmark_series.empty
+        if has_benchmark:
+            bm_name = metrics.get('benchmark_name', metrics.get('benchmark_ticker', 'Benchmark'))
+            cap0 = aporte_diario.dropna().iloc[0] if not aporte_diario.dropna().empty else 1.0
+            bm_scaled = benchmark_series / 100.0 * cap0
+            bm_scaled = bm_scaled.reindex(valor_total_cartera.index).ffill()
+            ax1.plot(bm_scaled, label=f'Benchmark ({bm_name})',
+                     linestyle=':', color='#F4A261', linewidth=1.5)
+
         ax1.set_title('Evolución cartera acciones', fontsize=12,
                        fontweight='bold', fontfamily='sans-serif')
         ax1.set_xlabel('Fecha', fontsize=9)
@@ -111,6 +124,7 @@ def generate_full_report(
         #  CHART 2 – Composition pie   (top-right)
         # ══════════════════════════════════════════════════════════════
         ax2 = fig.add_axes([0.50, 0.62, 0.49, 0.32])
+        ax2.set_facecolor('#d9d9d9')
         ultima_fecha = valor_cartera.index[-1]
         valor_por_activo = valor_cartera.loc[ultima_fecha].copy()
 
@@ -133,9 +147,18 @@ def generate_full_report(
         def _autopct(pct):
             return f'{pct:.1f}%' if pct >= 1 else ''
 
+        pie_colors = [
+            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+            '#aec7e8', '#ffbb78', '#98df8a', '#ff9896',
+        ]
+
         wedges, texts, autotexts = ax2.pie(
             grandes, labels=grandes.index, autopct=_autopct,
-            startangle=140, textprops={'fontsize': 7},
+            startangle=140,
+            colors=pie_colors[:len(grandes)],
+            textprops={'fontsize': 7},
+            wedgeprops={'linewidth': 1.0, 'edgecolor': '#d9d9d9'},
         )
         for at in autotexts:
             at.set_fontweight('bold'); at.set_fontsize(7)
@@ -175,6 +198,16 @@ def generate_full_report(
         ax4 = fig.add_axes([0.05, 0.01, 0.42, 0.3])
         ax4.axis('off')
 
+        bm_block = ""
+        if m.get('benchmark_ticker'):
+            bm_block = (
+                f"Benchmark ({m.get('benchmark_name', m['benchmark_ticker'])})\n"
+                f"  Total:     {m.get('benchmark_total', 0):.2f}%\n"
+                f"  Anual:     {m.get('benchmark_annual', 0):.2f}%\n"
+                f"  Alfa TWR:  {m.get('twr_total_anual', 0) - m.get('benchmark_annual', 0):.2f}%\n"
+                "──────────────────────────────────────────────────────────\n"
+            )
+
         resumen_izq = (
             "\n"
             "──────────────────────────────────────────────────────────\n"
@@ -191,7 +224,7 @@ def generate_full_report(
             f"TWR Anualizado:               {m.get('twr_total_anual', 0):.2f}%\n"
             "\n"
             "──────────────────────────────────────────────────────────\n"
-            "\n"
+            + bm_block +
             "\n"
             f"Fecha de evaluación: {m.get('fecha_actual', '')}\n"
             f"Período: {m.get('anhos_totales', 0):.2f} años\n"

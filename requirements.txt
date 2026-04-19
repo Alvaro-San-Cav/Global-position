@@ -3,3 +3,6 @@ numpy
 yfinance
 matplotlib
 seaborn
+fastapi
+uvicorn[standard]
+python-multipart
