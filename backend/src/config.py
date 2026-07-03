@@ -11,7 +11,8 @@ import logging
 import os
 
 # ── Paths ────────────────────────────────────────────────────────────────
-BASE_DIR       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Repo root: backend/src/config.py → three levels up.
+BASE_DIR       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 INPUT_DIR      = os.path.join(BASE_DIR, "input")
 PROCESSING_DIR = os.path.join(BASE_DIR, "processing")
 OUTPUT_DIR     = os.path.join(BASE_DIR, "output")
@@ -37,7 +38,7 @@ OPERATIONS_COLS = [
 ]
 
 # ── Custom sources (from sources.json) ───────────────────────────────────
-SOURCES_FILE = os.path.join(BASE_DIR, "sources.json")
+SOURCES_FILE = os.path.join(BASE_DIR, "backend", "sources.json")
 
 def load_sources() -> dict:
     """Return the parsed sources.json or empty structure if it doesn't exist."""

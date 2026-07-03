@@ -22,12 +22,10 @@ from src.core import (
     calculate_stock_portfolio,
     calculate_crypto_portfolio,
     compute_twr,
+    compute_metrics as _compute_metrics,
     normalize_date_series,
     _to_tznaive_safe,
 )
-
-# Importar _compute_metrics de main.py
-from main import _compute_metrics
 
 
 # ═══════════════════════════════════════════════════════════════════════

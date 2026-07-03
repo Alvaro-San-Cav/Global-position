@@ -164,7 +164,7 @@ def run_analysis():
             print(f"   Benchmark {bm_name}: total={bm_total*100:.2f}%  anual={bm_annual*100:.2f}%")
 
     # ── Consolidated metrics (notebook step 9) ───────────────────────
-    metrics = _compute_metrics(
+    metrics = core.compute_metrics(
         valor_total_cartera, aporte_diario,
         valor_total_crypto if has_crypto else None,
         aporte_crypto if has_crypto else None,
@@ -295,111 +295,6 @@ def run_tax_report():
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Metrics computation  (mirrors notebook step 9)
-# ─────────────────────────────────────────────────────────────────────────
-
-def _compute_metrics(valor_total_cartera, aporte_diario,
-                     valor_total_crypto, aporte_crypto,
-                     valor_crypto_eur) -> dict:
-    m: dict = {}
-    has_crypto = (valor_total_crypto is not None and not valor_total_crypto.empty)
-
-    # ── Acciones ─────────────────────────────────────────────────────
-    cap_acc = aporte_diario.iloc[-1]
-    val_acc = valor_total_cartera.iloc[-1]
-    pv_acc  = val_acc - cap_acc
-    rent_acc = (pv_acc / cap_acc * 100) if cap_acc > 0 else 0
-
-    dias_acc  = (valor_total_cartera.index[-1] - valor_total_cartera.index[0]).days
-    anhos_acc = dias_acc / 365.25
-    cagr_acc  = ((val_acc / cap_acc) ** (1 / anhos_acc) - 1) * 100 \
-                if anhos_acc > 0 and cap_acc > 0 else 0
-
-    # Use robust mixed timing for dashboard metrics:
-    # contributions at start-of-day, withdrawals at end-of-day.
-    twr_acc_t, twr_acc_a = core.compute_twr(valor_total_cartera, aporte_diario, flow_at='auto')
-    m.update(
-        capital_aportado_acciones=cap_acc,
-        valor_actual_acciones=val_acc,
-        plusvalia_acciones=pv_acc,
-        rentabilidad_acciones=rent_acc,
-        cagr_acciones=cagr_acc,
-        twr_acciones_total=twr_acc_t * 100,
-        twr_acciones_anual=twr_acc_a * 100,
-    )
-
-    # ── Crypto ───────────────────────────────────────────────────────
-    cap_cry = val_cry = pv_cry = rent_cry = cagr_cry = 0.0
-    twr_cry_t = twr_cry_a = 0.0
-    dias_cry = anhos_cry = 0
-
-    if has_crypto and aporte_crypto is not None:
-        cap_cry = aporte_crypto.iloc[-1]
-        val_cry = valor_total_crypto.iloc[-1]
-        pv_cry  = val_cry - cap_cry
-        rent_cry = (pv_cry / cap_cry * 100) if cap_cry > 0 else 0
-
-        dias_cry  = (valor_total_crypto.index[-1] - valor_total_crypto.index[0]).days
-        anhos_cry = dias_cry / 365.25
-        cagr_cry  = ((val_cry / cap_cry) ** (1 / anhos_cry) - 1) * 100 \
-                    if anhos_cry > 0 and cap_cry > 0 else 0
-
-        twr_cry_t, twr_cry_a = core.compute_twr(valor_total_crypto, aporte_crypto, flow_at='auto')
-        twr_cry_t *= 100; twr_cry_a *= 100
-
-    m.update(
-        capital_aportado_crypto=cap_cry,
-        valor_actual_crypto=val_cry,
-        plusvalia_crypto=pv_cry,
-        rentabilidad_crypto=rent_cry,
-        cagr_crypto=cagr_cry,
-        twr_cripto_total=twr_cry_t,
-        twr_cripto_anual=twr_cry_a,
-    )
-
-    # ── Totales combinados ───────────────────────────────────────────
-    cap_tot = cap_acc + cap_cry
-    val_tot = val_acc + val_cry
-    pv_tot  = val_tot - cap_tot
-    rent_tot = (pv_tot / cap_tot * 100) if cap_tot > 0 else 0
-
-    dias_tot  = max(dias_acc, dias_cry) if has_crypto else dias_acc
-    anhos_tot = dias_tot / 365.25
-    cagr_tot  = ((val_tot / cap_tot) ** (1 / anhos_tot) - 1) * 100 \
-                if anhos_tot > 0 and cap_tot > 0 else 0
-
-    # TWR combinado
-    if has_crypto:
-        common_idx = valor_total_cartera.index.union(valor_total_crypto.index).sort_values()
-        vc  = valor_total_cartera.reindex(common_idx).ffill().fillna(0)
-        vcy = valor_total_crypto.reindex(common_idx).ffill().fillna(0)
-        v_comb = vc + vcy
-        a_acc  = aporte_diario.reindex(common_idx).ffill().fillna(0)
-        a_cry  = aporte_crypto.reindex(common_idx).ffill().fillna(0)
-        a_comb = a_acc + a_cry
-        twr_tot_t, twr_tot_a = core.compute_twr(v_comb, a_comb, flow_at='auto')
-    else:
-        twr_tot_t, twr_tot_a = twr_acc_t, twr_acc_a
-
-    peso_acc = (val_acc / val_tot * 100) if val_tot > 0 else 100
-    peso_cry = (val_cry / val_tot * 100) if val_tot > 0 else 0
-
-    m.update(
-        capital_total=cap_tot,
-        valor_total=val_tot,
-        plusvalia_total=pv_tot,
-        rentabilidad_total=rent_tot,
-        cagr_total=cagr_tot,
-        twr_total_total=twr_tot_t * 100,
-        twr_total_anual=twr_tot_a * 100,
-        peso_acciones=peso_acc,
-        peso_crypto=peso_cry,
-        dias_totales=dias_tot,
-        anhos_totales=anhos_tot,
-        fecha_actual=valor_total_cartera.index[-1].strftime('%Y-%m-%d'),
-    )
-    return m
-
-
 # ─────────────────────────────────────────────────────────────────────────
 #  Console summary  (mirrors notebook step 9 prints)
 # ─────────────────────────────────────────────────────────────────────────

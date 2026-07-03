@@ -29,7 +29,6 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src import config, core, loaders, market_data, tax
-from main import _compute_metrics
 
 app = FastAPI(title="Global Position", docs_url=None, redoc_url=None)
 
@@ -196,7 +195,7 @@ def _build_dashboard() -> dict:
         vtc_total = vtc
         ad_total = ad
 
-    metrics = _compute_metrics(
+    metrics = core.compute_metrics(
         vtc, ad,
         vtc_crypto if has_crypto else None,
         aporte_crypto if has_crypto else None,
