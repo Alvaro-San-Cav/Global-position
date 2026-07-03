@@ -73,6 +73,21 @@ def get_benchmark() -> tuple[str, str]:
     return ticker, name
 
 
+def get_asset_classes() -> dict[str, str]:
+    """Return {SYMBOL_UPPER: asset_class} overrides from sources.json.
+
+    Overrides win over the automatic classifier (core.classify_asset), letting
+    the user pin a ticker to a class (e.g. a gold miner to "Acciones").
+    """
+    raw = load_sources().get("asset_classes", {})
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if k == "_comment" or not str(v).strip():
+            continue
+        out[str(k).strip().upper()] = str(v).strip()
+    return out
+
+
 def get_zero_value_flow_from_est_tickers() -> list[str]:
     """
     Return tickers that should estimate invested flow when Value==0.

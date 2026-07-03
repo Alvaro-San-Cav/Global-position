@@ -263,6 +263,27 @@ def _build_dashboard() -> dict:
     if (pcts < 2).any():
         grandes["Otros"] = vpa[pcts < 2].sum()
 
+    # Breakdown by general asset class (Acciones / ETF / Oro / Bonos / Cripto…)
+    class_overrides = config.get_asset_classes()
+    class_totals: dict[str, float] = {}
+    class_members: dict[str, list[dict]] = {}
+    for sym, val in vpa.items():
+        cls = core.classify_asset(str(sym), _asset_display_name(str(sym)), class_overrides)
+        class_totals[cls] = class_totals.get(cls, 0.0) + float(val)
+        class_members.setdefault(cls, []).append(
+            {"name": _asset_display_name(str(sym)), "symbol": str(sym), "value": round(float(val), 2)}
+        )
+    total_all = sum(class_totals.values()) or 1.0
+    class_breakdown = [
+        {
+            "name": cls,
+            "value": round(v, 2),
+            "pct": round(v / total_all * 100, 4),
+            "members": sorted(class_members[cls], key=lambda x: x["value"], reverse=True),
+        }
+        for cls, v in sorted(class_totals.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+
     # Stock correlations (assets above weight threshold in stock sleeve)
     correlation: dict = {
         "threshold_pct": 1.5,
@@ -408,6 +429,7 @@ def _build_dashboard() -> dict:
             {"name": _asset_display_name(str(k)), "symbol": str(k), "value": round(float(v), 2)}
             for k, v in vpa.head(10).items()
         ],
+        "class_breakdown": class_breakdown,
         "correlation": correlation,
         "crypto_chart": crypto_chart,
         "crypto_breakdown": crypto_breakdown,

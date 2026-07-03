@@ -6,6 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useDashboard } from '@/api/queries'
 import { fmtDate } from '@/lib/format'
 import { KpiGrid } from '@/components/dashboard/KpiGrid'
+import { ClassBreakdown } from '@/components/dashboard/ClassBreakdown'
 import { CryptoSection } from '@/components/dashboard/CryptoSection'
 import { DashboardToolbar } from '@/components/dashboard/DashboardToolbar'
 import { PortfolioChart } from '@/components/charts/PortfolioChart'
@@ -98,6 +99,17 @@ export function Dashboard() {
                   data={data.portfolio_chart}
                   benchmarkName={data.metrics.benchmark_name}
                 />
+              </CardContent>
+            </Card>
+          )}
+
+          {data.class_breakdown && data.class_breakdown.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Desglose por clase de activo</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ClassBreakdown classes={data.class_breakdown} />
               </CardContent>
             </Card>
           )}

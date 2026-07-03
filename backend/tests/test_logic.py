@@ -23,6 +23,7 @@ from src.core import (
     calculate_crypto_portfolio,
     compute_twr,
     compute_metrics as _compute_metrics,
+    classify_asset,
     normalize_date_series,
     _to_tznaive_safe,
 )
@@ -481,3 +482,28 @@ class TestAporteDiarioSign:
         # Day 5: sell  5 × 110 × 1.0 = -550  (negative flow = capital back)
         # Net aporte = 1000 - 550 = 450
         assert np.isclose(ad.iloc[-1], 450.0, rtol=0.01)
+
+
+class TestClassifyAsset:
+    """Asset-class classifier used for the dashboard breakdown."""
+
+    def test_gold_before_etf(self):
+        # 'PHYSICAL GOLD ETC' contains ISHARES (ETF kw) but gold wins.
+        assert classify_asset("PPFB.DE", "ISHARES PHYSICAL GOLD ETC") == "Oro / Materias primas"
+
+    def test_etf_by_ucits(self):
+        assert classify_asset("EQQQ.MI", "INVESCO POWERSHARES EQQQ NASDAQ-100 UCITS ETF") == "ETF"
+
+    def test_bond_keyword(self):
+        assert classify_asset("AGG", "ISHARES CORE US AGGREGATE BOND ETF") == "Bonos"
+
+    def test_crypto_symbol(self):
+        assert classify_asset("BTC", "Bitcoin") == "Cripto"
+        assert classify_asset("ETH-EUR", "Ethereum") == "Cripto"
+
+    def test_default_stock(self):
+        assert classify_asset("SAP.DE", "SAP SE") == "Acciones"
+
+    def test_override_wins(self):
+        assert classify_asset("PPFB.DE", "ISHARES PHYSICAL GOLD ETC",
+                              {"PPFB.DE": "Acciones"}) == "Acciones"

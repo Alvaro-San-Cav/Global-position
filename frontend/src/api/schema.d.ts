@@ -326,6 +326,20 @@ export interface components {
             /** Files */
             files: string[];
         };
+        /** ClassSlice */
+        ClassSlice: {
+            /** Name */
+            name: string;
+            /** Value */
+            value: number;
+            /** Pct */
+            pct: number;
+            /**
+             * Members
+             * @default []
+             */
+            members: components["schemas"]["AssetSlice"][];
+        };
         /** Correlation */
         Correlation: {
             /** Threshold Pct */
@@ -435,6 +449,8 @@ export interface components {
             portfolio_total_value?: number | null;
             /** Top Assets */
             top_assets?: components["schemas"]["AssetSlice"][] | null;
+            /** Class Breakdown */
+            class_breakdown?: components["schemas"]["ClassSlice"][] | null;
             correlation?: components["schemas"]["Correlation"] | null;
             crypto_chart?: components["schemas"]["CryptoChart"] | null;
             /** Crypto Breakdown */

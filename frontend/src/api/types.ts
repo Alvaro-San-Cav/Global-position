@@ -53,6 +53,13 @@ export interface CryptoSlice extends AssetSlice {
   pct: number
 }
 
+export interface ClassSlice {
+  name: string
+  value: number
+  pct: number
+  members: AssetSlice[]
+}
+
 export interface CorrelationAsset {
   name: string
   symbol: string
@@ -95,6 +102,7 @@ export interface DashboardResponse {
   composition_full?: AssetSlice[] | null
   portfolio_total_value?: number | null
   top_assets?: AssetSlice[] | null
+  class_breakdown?: ClassSlice[] | null
   correlation?: Correlation | null
   crypto_chart?: CryptoChart | null
   crypto_breakdown?: CryptoSlice[] | null

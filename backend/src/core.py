@@ -18,6 +18,47 @@ from . import config
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  Asset classification (by class: Acciones / ETF / Oro / Bonos / Cripto…)
+# ─────────────────────────────────────────────────────────────────────────
+
+# Checked in order; the first matching class wins. Gold/commodity is checked
+# before ETF so a "PHYSICAL GOLD ETC" lands in Oro, not ETF.
+_CLASS_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("Oro / Materias primas",
+     ("PHYSICAL GOLD", "GOLD", "ORO ", "BULLION", "SILVER", "PLATA", "PLATINUM",
+      "PALLADIUM", "COMMODIT", "MATERIAS PRIMAS", "CRUDE", "OIL", "BRENT")),
+    ("Bonos",
+     ("BOND", "BONO", "TREASURY", "GILT", " BUND", "GOVIE", "AGGREGATE BOND",
+      "OBLIGATION", "OBLIGACION", "FIXED INCOME", "RENTA FIJA", "SOVEREIGN")),
+    ("ETF",
+     ("UCITS", " ETF", "ETF ", "ISHARES", "INVESCO", "POWERSHARES", "VANGUARD",
+      "SPDR", "LYXOR", "AMUNDI", "XTRACKERS", "VANECK", "WISDOMTREE",
+      "GLOBAL X", " ETC", "INDEX FUND")),
+]
+
+_CRYPTO_SYMBOLS = {"BTC", "ETH", "USDT", "USDC", "BNB", "SOL", "ADA", "XRP", "DOGE"}
+
+
+def classify_asset(symbol: str, product: str = "", overrides: dict[str, str] | None = None) -> str:
+    """Return a general asset class for a holding.
+
+    Priority: explicit override (by symbol) > crypto symbol > keyword match on
+    "SYMBOL PRODUCT" > default "Acciones".
+    """
+    sym = str(symbol or "").strip().upper()
+    if overrides and sym in overrides:
+        return overrides[sym]
+    if sym in _CRYPTO_SYMBOLS or sym.endswith("-EUR") or sym.endswith("-USD"):
+        return "Cripto"
+
+    hay = f" {sym} {str(product or '').upper()} "
+    for cls, keywords in _CLASS_KEYWORDS:
+        if any(kw in hay for kw in keywords):
+            return cls
+    return "Acciones"
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Date helpers (tz-naive, normalised to midnight)
 # ─────────────────────────────────────────────────────────────────────────
 

@@ -66,6 +66,13 @@ class CryptoSlice(BaseModel):
     pct: float
 
 
+class ClassSlice(BaseModel):
+    name: str
+    value: float
+    pct: float
+    members: list[AssetSlice] = []
+
+
 class CorrelationAsset(BaseModel):
     name: str
     symbol: str
@@ -114,6 +121,7 @@ class DashboardResponse(BaseModel):
     composition_full: list[AssetSlice] | None = None
     portfolio_total_value: float | None = None
     top_assets: list[AssetSlice] | None = None
+    class_breakdown: list[ClassSlice] | None = None
     correlation: Correlation | None = None
     crypto_chart: CryptoChart | None = None
     crypto_breakdown: list[CryptoSlice] | None = None
