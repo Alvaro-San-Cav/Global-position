@@ -31,3 +31,9 @@ processing/
 
 # Logs
 *.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
