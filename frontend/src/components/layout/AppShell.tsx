@@ -30,9 +30,7 @@ export function AppShell() {
     <div className="flex h-screen overflow-hidden">
       <aside className="flex w-[220px] flex-shrink-0 flex-col border-r border-border-subtle bg-bg2">
         <div className="flex h-14 items-center gap-2 px-5">
-          <div className="flex size-7 items-center justify-center rounded-[var(--radius-card)] bg-accent text-sm font-bold text-white">
-            G
-          </div>
+          <img src="/app-icon.png" alt="" className="size-7 shrink-0" />
           <span className="text-sm font-semibold text-txt">Global Position</span>
         </div>
         <nav className="flex flex-col gap-0.5 px-3 py-2">
