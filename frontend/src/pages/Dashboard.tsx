@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useDashboard } from '@/api/queries'
+import { useCash, useDashboard } from '@/api/queries'
 import { fmtDate, fmtEur } from '@/lib/format'
 import { KpiGrid } from '@/components/dashboard/KpiGrid'
 import { ClassBreakdown } from '@/components/dashboard/ClassBreakdown'
@@ -52,6 +52,13 @@ function EmptyState({ message }: { message: string }) {
 
 export function Dashboard() {
   const { data, isLoading, isError, error } = useDashboard()
+  const { data: cash } = useCash()
+
+  // Prefer the fast /api/cash figure so edits reflect instantly; net worth is
+  // computed client-side (invested value + cash) without waiting for the
+  // slower dashboard price rebuild.
+  const cashTotal = cash?.total_eur ?? data?.cash_total ?? 0
+  const netWorth = (data?.portfolio_total_value ?? 0) + cashTotal
 
   const subtitle = data?.metrics?.fecha_actual
     ? `Análisis a ${fmtDate(data.metrics.fecha_actual)}`
@@ -86,15 +93,15 @@ export function Dashboard() {
 
           <KpiGrid metrics={data.metrics} />
 
-          {data.cash_total != null && data.cash_total > 0 && (
+          {cashTotal > 0 && (
             <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-[var(--radius-card)] border border-border-subtle bg-card px-4 py-3 text-sm">
               <span className="text-txt2">
                 Efectivo:{' '}
-                <span className="font-medium text-txt">{fmtEur(data.cash_total)}</span>
+                <span className="font-medium text-txt">{fmtEur(cashTotal)}</span>
               </span>
               <span className="text-txt2">
                 Patrimonio total (inversión + efectivo):{' '}
-                <span className="font-semibold text-accent2">{fmtEur(data.net_worth)}</span>
+                <span className="font-semibold text-accent2">{fmtEur(netWorth)}</span>
               </span>
             </div>
           )}

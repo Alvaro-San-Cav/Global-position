@@ -1,8 +1,9 @@
-import { FileDown, Loader2, RefreshCw } from 'lucide-react'
+import { FileDown, Loader2, RefreshCw, Wallet } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { useGenerateReport, useRefreshDashboard } from '@/api/queries'
 import { downloadFile } from '@/api/client'
+import { CashDialog } from '@/components/dashboard/CashDialog'
 
 export function DashboardToolbar() {
   const refresh = useRefreshDashboard()
@@ -27,6 +28,14 @@ export function DashboardToolbar() {
 
   return (
     <>
+      <CashDialog
+        trigger={
+          <Button variant="outline" size="sm">
+            <Wallet />
+            Efectivo
+          </Button>
+        }
+      />
       <Button variant="outline" size="sm" onClick={onRefresh} disabled={refresh.isPending}>
         {refresh.isPending ? (
           <Loader2 className="animate-spin" />
