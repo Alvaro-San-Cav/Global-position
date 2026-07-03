@@ -11,10 +11,7 @@ $root    = $PSScriptRoot
 $desktop = [Environment]::GetFolderPath('Desktop')
 $lnkPath = Join-Path $desktop 'Global Position.lnk'
 
-$chrome = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe' -ErrorAction SilentlyContinue).'(default)'
-if (-not $chrome -or -not (Test-Path $chrome)) {
-    $chrome = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
-}
+$icon = Join-Path $root 'frontend\public\app-icon.ico'
 
 $shell = New-Object -ComObject WScript.Shell
 $lnk = $shell.CreateShortcut($lnkPath)
@@ -22,7 +19,7 @@ $lnk.TargetPath       = 'powershell.exe'
 $lnk.Arguments        = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$root\launch-app.ps1`""
 $lnk.WorkingDirectory = $root
 $lnk.Description      = 'Global Position — cartera de inversión'
-if (Test-Path $chrome) { $lnk.IconLocation = "$chrome,0" }
+if (Test-Path $icon) { $lnk.IconLocation = "$icon,0" }
 $lnk.Save()
 
 Write-Output "Acceso directo creado: $lnkPath"
