@@ -6,6 +6,7 @@ import {
 } from '@tanstack/react-query'
 import { apiGet, apiPost, apiDelete, apiUpload } from './client'
 import type {
+  AssetClassesResponse,
   CryptoOperation,
   CryptoOperationCreate,
   DashboardResponse,
@@ -25,6 +26,7 @@ export const qk = {
   crypto: ['crypto'] as const,
   tax: ['tax'] as const,
   sources: ['sources'] as const,
+  assetClasses: ['asset-classes'] as const,
   pending: ['pending-files'] as const,
   sourceFiles: ['source-files'] as const,
   sourceData: ['source-data'] as const,
@@ -69,6 +71,13 @@ export function useSources() {
   return useQuery<SourcesConfig>({
     queryKey: qk.sources,
     queryFn: () => apiGet<SourcesConfig>('/api/sources'),
+  })
+}
+
+export function useAssetClasses() {
+  return useQuery<AssetClassesResponse>({
+    queryKey: qk.assetClasses,
+    queryFn: () => apiGet<AssetClassesResponse>('/api/asset-classes'),
   })
 }
 
@@ -126,6 +135,7 @@ export function useSaveSources() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.sources })
       qc.invalidateQueries({ queryKey: qk.dashboard })
+      qc.invalidateQueries({ queryKey: qk.assetClasses })
     },
   })
 }

@@ -73,6 +73,20 @@ class ClassSlice(BaseModel):
     members: list[AssetSlice] = []
 
 
+class AssetClassItem(BaseModel):
+    symbol: str
+    name: str
+    auto: str                 # class from the heuristic
+    override: str | None = None   # explicit override from sources.json, if any
+    effective: str            # override or auto
+    kind: str                 # "stock" | "crypto"
+
+
+class AssetClassesResponse(BaseModel):
+    known_classes: list[str]
+    items: list[AssetClassItem]
+
+
 class CorrelationAsset(BaseModel):
     name: str
     symbol: str

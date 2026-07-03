@@ -60,6 +60,20 @@ export interface ClassSlice {
   members: AssetSlice[]
 }
 
+export interface AssetClassItem {
+  symbol: string
+  name: string
+  auto: string
+  override?: string | null
+  effective: string
+  kind: 'stock' | 'crypto'
+}
+
+export interface AssetClassesResponse {
+  known_classes: string[]
+  items: AssetClassItem[]
+}
+
 export interface CorrelationAsset {
   name: string
   symbol: string

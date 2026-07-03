@@ -32,6 +32,7 @@ if ROOT not in sys.path:
 
 from src import config, core, loaders, market_data, tax
 from src.api_models import (
+    AssetClassesResponse,
     CryptoOperationCreate,
     DashboardResponse,
     OkResponse,
@@ -783,6 +784,66 @@ def api_invalidate():
     global _dashboard_cache
     _dashboard_cache = {}
     return {"ok": True}
+
+
+# Suggested classes offered in the UI (plus any class already used in overrides).
+KNOWN_ASSET_CLASSES = ["Acciones", "ETF", "Oro / Materias primas", "Bonos", "Cripto"]
+
+
+@app.get("/api/asset-classes", response_model=AssetClassesResponse)
+def api_asset_classes():
+    """Per-ticker asset-class view for the settings editor.
+
+    Offline/fast: derives held symbols from operations + crypto WITHOUT hitting
+    the network, and reports the automatic class, the override (if any) and the
+    effective class for each.
+    """
+    try:
+        overrides = config.get_asset_classes()  # {SYMBOL_UPPER: class}
+        items: list[dict] = []
+        seen: set[str] = set()
+
+        # ── Stocks ──
+        df = loaders.load_operations()
+        if not df.empty:
+            df = loaders.merge_custom_stock_sources(df)
+            df["ticker"] = df.get("ticker", "").fillna("").astype(str).str.strip()
+            df["Product"] = df.get("Product", "").fillna("").astype(str).str.strip()
+            named = df[(df["ticker"] != "")].sort_values("Date", kind="mergesort")
+            name_map = named.drop_duplicates("ticker", keep="last").set_index("ticker")["Product"].to_dict()
+            for sym in sorted(name_map.keys(), key=lambda s: s.upper()):
+                up = sym.upper()
+                if up in seen:
+                    continue
+                seen.add(up)
+                product = name_map.get(sym, "") or sym
+                auto = core.classify_asset(sym, product)
+                ov = overrides.get(up)
+                items.append({
+                    "symbol": sym, "name": product, "auto": auto,
+                    "override": ov, "effective": ov or auto, "kind": "stock",
+                })
+
+        # ── Crypto ──
+        df_c = loaders.load_crypto_operations()
+        if df_c is not None and not df_c.empty and "Coin" in df_c.columns:
+            for coin in sorted(df_c["Coin"].dropna().astype(str).str.strip().unique()):
+                up = coin.upper()
+                if not coin or up in seen:
+                    continue
+                seen.add(up)
+                auto = core.classify_asset(coin, coin)
+                ov = overrides.get(up)
+                items.append({
+                    "symbol": coin, "name": coin, "auto": auto,
+                    "override": ov, "effective": ov or auto, "kind": "crypto",
+                })
+
+        known = list(dict.fromkeys(KNOWN_ASSET_CLASSES + [v for v in overrides.values()]))
+        return {"known_classes": known, "items": items}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
 
 
 # ─────────────────────────────────────────────────────────────────────────

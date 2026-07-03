@@ -86,3 +86,15 @@ def test_crypto_list_shape():
 def test_report_pdf_returns_pdf_or_404():
     r = client.get("/api/report/pdf")
     assert r.status_code in (200, 404)
+
+
+def test_asset_classes_shape():
+    r = client.get("/api/asset-classes")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["known_classes"], list)
+    assert "Acciones" in body["known_classes"]
+    assert isinstance(body["items"], list)
+    if body["items"]:
+        it = body["items"][0]
+        assert {"symbol", "name", "auto", "effective", "kind"} <= set(it.keys())
