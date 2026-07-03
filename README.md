@@ -204,8 +204,9 @@ historial de yfinance) y se aplican retroactivamente a las cantidades.
 
 ## Nota de paridad
 
-`docs/paridad.md` documenta la equivalencia con el notebook original y una
-**discrepancia pre-existente** entre el valor de acciones del CLI y el del
-dashboard web (distinta resolución de tickers en cada ruta). No fue introducida
-por la migración de frontend; se recomienda unificar ambas rutas como tarea
-aparte.
+`docs/paridad.md` documenta la equivalencia con el notebook original. Durante la
+migración se detectó y corrigió un bug de caché: `price_adjustments` (p. ej.
+`PSH.L /100`) no se aplicaban cuando los precios venían de caché completa, lo que
+inflaba el valor de acciones ~×100 en ese ticker. Corregido en
+`market_data._apply_price_adjustments` con test de regresión; CLI y dashboard
+reportan ahora las mismas cifras.

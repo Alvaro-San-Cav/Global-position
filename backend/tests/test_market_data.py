@@ -60,3 +60,34 @@ def test_fetch_prices_backfills_new_ticker_from_start_date(tmp_path, monkeypatch
 
     assert any(req == ("SAP.DE",) and dl_start == start_date for req, dl_start in calls)
     assert any(req == ("AAPL",) and dl_start == last_cached + pd.Timedelta(days=1) for req, dl_start in calls)
+
+
+def test_price_adjustments_applied_on_full_cache_hit(tmp_path, monkeypatch):
+    """Regression: price_adjustments must apply even when the cache is complete
+    up to today and no download happens. Prices are cached RAW; the divisor
+    (e.g. PSH.L /100 for pence) has to be applied on the cache-hit return path.
+    """
+    today = pd.Timestamp.today().normalize()
+    start_date = today - pd.Timedelta(days=4)
+    cache_index = pd.date_range(start=start_date, end=today, freq="D")
+    # Raw pence prices stored in cache (e.g. 5000 pence = £50).
+    cached_prices = pd.DataFrame(
+        {"PSH.L": [5000.0] * len(cache_index), "AAPL": [200.0] * len(cache_index)},
+        index=cache_index,
+    )
+    cache_file = tmp_path / "prices.csv"
+    cached_prices.to_csv(cache_file)
+
+    monkeypatch.setattr(config, "PRICES_CACHE_FILE", str(cache_file))
+    monkeypatch.setattr(config, "get_price_adjustments", lambda: {"PSH.L": 100})
+
+    def fail_download(*args, **kwargs):
+        raise AssertionError("no download expected on a full cache hit")
+
+    monkeypatch.setattr(market_data.yf, "download", fail_download)
+
+    result = market_data.fetch_prices(["PSH.L", "AAPL"], start_date)
+
+    # PSH.L divided by 100 (pence -> pounds); AAPL untouched.
+    assert result["PSH.L"].iloc[-1] == 50.0
+    assert result["AAPL"].iloc[-1] == 200.0

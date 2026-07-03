@@ -109,6 +109,23 @@ def _save_cache(df: pd.DataFrame, path: str) -> None:
     df.to_csv(path)
 
 
+def _apply_price_adjustments(data: pd.DataFrame) -> pd.DataFrame:
+    """Apply sources.json price_adjustments (divisors) to a price frame.
+
+    Prices are cached RAW (unadjusted), so the divisors (e.g. PSH.L /100 for
+    pence, NEPTF /1000) must be applied on EVERY return path — both the fresh
+    download and the cache-hit early returns — or cached runs would report
+    prices orders of magnitude too large.
+    """
+    if data is None or data.empty:
+        return data
+    data = data.copy()
+    for ticker, divisor in config.get_price_adjustments().items():
+        if ticker in data.columns and divisor:
+            data[ticker] = data[ticker] / divisor
+    return data
+
+
 def _normalize_legacy_fx_cache(df: pd.DataFrame | None) -> tuple[pd.DataFrame | None, bool]:
     """
     Normalize legacy FX cache values that may have been saved already adjusted.
@@ -258,7 +275,7 @@ def fetch_prices(tickers: list[str], start_date) -> pd.DataFrame:
         if last_cached_day >= today and not missing_tickers:
             print(f"[+] Prices loaded from cache ({len(tickers)} ticker(s), up to {last_cached_day.date()}).")
             data = cached.reindex(all_days).ffill()[tickers]
-            return data
+            return _apply_price_adjustments(data)
 
         # Existing tickers can stay incremental; missing ones need full history.
         if existing_tickers and last_cached_day >= pd.Timestamp(start_date):
@@ -267,7 +284,8 @@ def fetch_prices(tickers: list[str], start_date) -> pd.DataFrame:
     if pd.Timestamp(from_date) > today and not missing_tickers:
         print(f"[+] Prices fully cached for today ({today.date()}).")
         if cached is not None:
-            return cached.reindex(all_days).ffill()[[t for t in tickers if t in cached.columns]]
+            data = cached.reindex(all_days).ffill()[[t for t in tickers if t in cached.columns]]
+            return _apply_price_adjustments(data)
         return pd.DataFrame()
 
     new_frames = []
@@ -296,11 +314,9 @@ def fetch_prices(tickers: list[str], start_date) -> pd.DataFrame:
 
     data = data.reindex(all_days).ffill()
 
-    # Configurable price adjustments (from sources.json → price_adjustments)
-    for ticker, divisor in config.get_price_adjustments().items():
-        if ticker in data.columns:
-            data[ticker] = data[ticker] / divisor
-            print(f"   [ok] {ticker} price adjusted (/{divisor:g})")
+    # Configurable price adjustments (from sources.json → price_adjustments).
+    # Applied here AND on the cache-hit early returns above via the same helper.
+    data = _apply_price_adjustments(data)
 
     return data[[t for t in tickers if t in data.columns]]
 

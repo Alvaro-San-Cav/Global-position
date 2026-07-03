@@ -37,36 +37,39 @@ intradía del mismo día). Gate cumplido: **pre ≡ post**.
 | Peso en cartera | 22.75 % | 21.56 % | 21.56 % |
 | **BENCHMARK (IWDA)** | — (no existía) | total 146.91 %, anual 15.36 % | total 146.91 %, anual 15.36 % |
 
-## ⚠️ Discrepancia PRE-EXISTENTE descubierta: dashboard web ≠ CLI
+## 🐛 Bug encontrado y CORREGIDO: `price_adjustments` no se aplicaban con caché caliente
 
-Durante la verificación en navegador se detectó que el endpoint `/api/dashboard`
-(la web, tanto la vieja como la nueva) reporta un **valor de acciones distinto
-al del CLI**:
+Durante la verificación en navegador el dashboard mostró €182,355 total /
+€159,220 acciones frente a los €107,313 / €84,177 del CLI. La investigación
+descartó las dos rutas de código (`run_analysis` vs `_build_dashboard`
+producían el mismo resultado con la misma caché) y localizó la causa real:
 
-| | CLI (`main.py`) | Dashboard (`/api/dashboard`) |
+**`market_data.fetch_prices` tenía retornos tempranos en los cache-hit completos
+que NO aplicaban `price_adjustments`.** Los precios se cachean en crudo (RAW) y
+el divisor (`PSH.L /100` por cotizar en peniques, `NEPTF /1000`) solo se aplicaba
+en la ruta de descarga fresca. Resultado:
+
+- Caché fría (primer run) → ajustes aplicados → PSH.L ≈ €758 → total correcto €84,177.
+- Caché caliente (runs posteriores) → ajustes omitidos → **PSH.L ×100 ≈ €75,800** →
+  total inflado €159,220.
+
+No era una diferencia dashboard-vs-CLI (ambos usan el mismo `fetch_prices`), sino
+**caché-caliente vs caché-fría**.
+
+**Corrección**: `price_adjustments` extraído a `_apply_price_adjustments()` y
+aplicado en las tres rutas de retorno de `fetch_prices` (dos cache-hit + descarga
+fresca). Test de regresión en `tests/test_market_data.py::
+test_price_adjustments_applied_on_full_cache_hit`.
+
+**Resultado post-fix** (caché caliente):
+
+| | CLI | Dashboard `/api/dashboard` |
 |---|---|---|
-| Valor acciones | €84,177 | €159,220 |
-| Valor total | €107,313 | €182,355 |
-| Capital aportado | €71,409 | €71,409 (igual) |
-| Valor crypto | €23,136 | €23,136 (igual) |
+| Valor acciones | €84,177 | €84,177 |
+| Valor total | €107,312.56 | €107,312.56 |
 
-**Causa raíz**: las dos rutas resuelven/preparan las operaciones de acciones de
-forma diferente antes de valorar:
-- `main.run_analysis` usa `market_data.update_tickers_in_operations(df_ops)`.
-- `server._build_dashboard` usa un `_resolve_tickers_silent(df_merged)` local.
-
-Ambas llaman luego a `core.calculate_stock_portfolio`, pero con un conjunto de
-operaciones/tickers distinto, produciendo valoraciones de acciones divergentes.
-
-**Importante**:
-- Es un problema **anterior a esta migración de frontend**. La web antigua
-  (`web/index.html`) consumía el mismo `/api/dashboard` y mostraba los mismos
-  €182k. La migración no introdujo la divergencia ni modificó `_build_dashboard`.
-- Está **fuera del alcance** de esta migración (no se toca la lógica de cálculo).
-- **Recomendación**: unificar ambas rutas para que `_build_dashboard` reutilice
-  exactamente el mismo pipeline de preparación de operaciones que
-  `run_analysis` (o extraer una función común). Debe abordarse como tarea
-  separada de corrección de backend, verificando después que dashboard ≡ CLI.
+Ambas superficies coinciden. Los valores de la tabla de arriba (columna
+"post-migración") corresponden a estas cifras correctas.
 
 ## Análisis de la divergencia notebook vs sistema
 
