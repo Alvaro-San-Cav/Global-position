@@ -21,6 +21,7 @@ HIST_DIR       = os.path.join(OUTPUT_DIR, "hist-inf")
 # Master database files (processing/)
 OPERATIONS_FILE = os.path.join(PROCESSING_DIR, "operaciones.csv")
 CRYPTO_DB       = os.path.join(PROCESSING_DIR, "crypto.csv")
+CASH_FILE       = os.path.join(PROCESSING_DIR, "cash.json")
 
 # Backup & audit log
 BACKUP_DIR           = os.path.join(PROCESSING_DIR, "backup")

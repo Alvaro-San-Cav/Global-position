@@ -30,9 +30,12 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from src import cash as cash_store
 from src import config, core, loaders, market_data, tax
 from src.api_models import (
     AssetClassesResponse,
+    CashResponse,
+    CashUpdate,
     CryptoOperationCreate,
     DashboardResponse,
     OkResponse,
@@ -183,6 +186,12 @@ def _build_dashboard() -> dict:
     tickers = [t for t in df_merged["ticker"].dropna().unique() if t and str(t).strip()]
     currencies = df_merged["Coin"].dropna().unique().tolist()
 
+    # Cash balances (per currency); ensure their FX is fetched too.
+    cash_balances = cash_store.load_cash()
+    for cur in cash_balances:
+        if cur not in currencies and cur != "EUR":
+            currencies.append(cur)
+
     df_crypto = loaders.load_crypto_operations()
     has_crypto = df_crypto is not None and len(df_crypto) > 0
     crypto_coins = df_crypto["Coin"].dropna().unique().tolist() if has_crypto else []
@@ -264,7 +273,7 @@ def _build_dashboard() -> dict:
     if (pcts < 2).any():
         grandes["Otros"] = vpa[pcts < 2].sum()
 
-    # Breakdown by general asset class (Acciones / ETF / Oro / Bonos / Cripto…)
+    # Breakdown by general asset class (Acciones / ETF / Oro / Bonos / Cripto / Efectivo…)
     class_overrides = config.get_asset_classes()
     class_totals: dict[str, float] = {}
     class_members: dict[str, list[dict]] = {}
@@ -274,6 +283,17 @@ def _build_dashboard() -> dict:
         class_members.setdefault(cls, []).append(
             {"name": _asset_display_name(str(sym)), "symbol": str(sym), "value": round(float(val), 2)}
         )
+
+    # Cash → "Efectivo" class (converted to EUR, kept OUT of P&L metrics).
+    cash_eur_by_cur = cash_store.cash_to_eur(cash_balances, fx_rates)
+    cash_total = round(sum(cash_eur_by_cur.values()), 2)
+    if cash_total > 0:
+        class_totals["Efectivo"] = class_totals.get("Efectivo", 0.0) + cash_total
+        for cur, eur in sorted(cash_eur_by_cur.items(), key=lambda kv: kv[1], reverse=True):
+            class_members.setdefault("Efectivo", []).append(
+                {"name": f"Efectivo {cur}", "symbol": cur, "value": round(float(eur), 2)}
+            )
+
     total_all = sum(class_totals.values()) or 1.0
     class_breakdown = [
         {
@@ -426,6 +446,8 @@ def _build_dashboard() -> dict:
             for k, v in vpa.items()
         ],
         "portfolio_total_value": round(float(vpa.sum()), 2),
+        "cash_total": cash_total,
+        "net_worth": round(float(vpa.sum()) + cash_total, 2),
         "top_assets":  [
             {"name": _asset_display_name(str(k)), "symbol": str(k), "value": round(float(v), 2)}
             for k, v in vpa.head(10).items()
@@ -786,8 +808,39 @@ def api_invalidate():
     return {"ok": True}
 
 
+def _cash_response() -> dict:
+    balances = cash_store.load_cash()
+    # Convert with cached FX if available (no network); EUR/unknown → rate 1.0.
+    fx = market_data._load_cache(config.FX_CACHE_FILE)
+    eur = cash_store.cash_to_eur(balances, fx)
+    entries = [
+        {"currency": cur, "amount": round(amt, 2), "eur": eur.get(cur, round(amt, 2))}
+        for cur, amt in sorted(balances.items())
+    ]
+    return {"balances": entries, "total_eur": round(sum(e["eur"] for e in entries), 2)}
+
+
+@app.get("/api/cash", response_model=CashResponse)
+def api_cash_get():
+    try:
+        return _cash_response()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/cash", response_model=CashResponse)
+def api_cash_post(body: CashUpdate):
+    try:
+        cash_store.save_cash(body.balances)
+        global _dashboard_cache
+        _dashboard_cache = {}
+        return _cash_response()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # Suggested classes offered in the UI (plus any class already used in overrides).
-KNOWN_ASSET_CLASSES = ["Acciones", "ETF", "Oro / Materias primas", "Bonos", "Cripto"]
+KNOWN_ASSET_CLASSES = ["Acciones", "ETF", "Oro / Materias primas", "Bonos", "Cripto", "Efectivo"]
 
 
 @app.get("/api/asset-classes", response_model=AssetClassesResponse)

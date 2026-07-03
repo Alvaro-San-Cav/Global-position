@@ -63,7 +63,8 @@
         "SAP"
     ],
     "asset_classes": {
-        "_comment": "Override de la clase de activo por ticker (gana sobre el clasificador automático). Ej: {\"BABA\": \"Acciones\", \"PPFB.DE\": \"Oro / Materias primas\"}. Clases sugeridas: Acciones, ETF, Oro / Materias primas, Bonos, Cripto. El clasificador automático deduce la clase del nombre del producto (UCITS/ISHARES->ETF, GOLD->Oro, BOND->Bonos, BTC/ETH->Cripto)."
+        "_comment": "Override de la clase de activo por ticker (gana sobre el clasificador automático). Ej: {\"BABA\": \"Acciones\", \"PPFB.DE\": \"Oro / Materias primas\"}. Clases sugeridas: Acciones, ETF, Oro / Materias primas, Bonos, Cripto. El clasificador automático deduce la clase del nombre del producto (UCITS/ISHARES->ETF, GOLD->Oro, BOND->Bonos, BTC/ETH->Cripto).",
+        "K.TO": "Acciones"
     },
     "_instructions": "Añade tus propias fuentes de datos aquí. Cada stock_source define un CSV con acciones extra (ej. RSUs, vests). Cada crypto_source define un exchange de crypto. Pon enabled=true para activarlas. price_adjustments y fx_adjustments permiten ajustar precios y tipos de cambio dividiendo por el valor indicado."
 }

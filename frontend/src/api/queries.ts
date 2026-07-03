@@ -7,6 +7,7 @@ import {
 import { apiGet, apiPost, apiDelete, apiUpload } from './client'
 import type {
   AssetClassesResponse,
+  CashResponse,
   CryptoOperation,
   CryptoOperationCreate,
   DashboardResponse,
@@ -27,6 +28,7 @@ export const qk = {
   tax: ['tax'] as const,
   sources: ['sources'] as const,
   assetClasses: ['asset-classes'] as const,
+  cash: ['cash'] as const,
   pending: ['pending-files'] as const,
   sourceFiles: ['source-files'] as const,
   sourceData: ['source-data'] as const,
@@ -78,6 +80,25 @@ export function useAssetClasses() {
   return useQuery<AssetClassesResponse>({
     queryKey: qk.assetClasses,
     queryFn: () => apiGet<AssetClassesResponse>('/api/asset-classes'),
+  })
+}
+
+export function useCash() {
+  return useQuery<CashResponse>({
+    queryKey: qk.cash,
+    queryFn: () => apiGet<CashResponse>('/api/cash'),
+  })
+}
+
+export function useSaveCash() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (balances: Record<string, number>) =>
+      apiPost<CashResponse>('/api/cash', { balances }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.cash })
+      qc.invalidateQueries({ queryKey: qk.dashboard })
+    },
   })
 }
 

@@ -4,7 +4,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useDashboard } from '@/api/queries'
-import { fmtDate } from '@/lib/format'
+import { fmtDate, fmtEur } from '@/lib/format'
 import { KpiGrid } from '@/components/dashboard/KpiGrid'
 import { ClassBreakdown } from '@/components/dashboard/ClassBreakdown'
 import { CryptoSection } from '@/components/dashboard/CryptoSection'
@@ -85,6 +85,19 @@ export function Dashboard() {
           )}
 
           <KpiGrid metrics={data.metrics} />
+
+          {data.cash_total != null && data.cash_total > 0 && (
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-[var(--radius-card)] border border-border-subtle bg-card px-4 py-3 text-sm">
+              <span className="text-txt2">
+                Efectivo:{' '}
+                <span className="font-medium text-txt">{fmtEur(data.cash_total)}</span>
+              </span>
+              <span className="text-txt2">
+                Patrimonio total (inversión + efectivo):{' '}
+                <span className="font-semibold text-accent2">{fmtEur(data.net_worth)}</span>
+              </span>
+            </div>
+          )}
 
           {data.portfolio_chart && (
             <Card>

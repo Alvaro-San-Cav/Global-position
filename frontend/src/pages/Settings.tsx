@@ -13,6 +13,7 @@ import type { SourcesConfig } from '@/api/types'
 import { KeyValueEditor, type KVRow } from '@/components/settings/KeyValueEditor'
 import { Toggle } from '@/components/settings/Toggle'
 import { AssetClassEditor } from '@/components/settings/AssetClassEditor'
+import { CashEditor } from '@/components/settings/CashEditor'
 
 const SAVE_NOTE = 'Los cambios aplican al recalcular el dashboard.'
 
@@ -180,6 +181,7 @@ export function Settings() {
         <TabsList>
           <TabsTrigger value="fuentes">Fuentes</TabsTrigger>
           <TabsTrigger value="clases">Clases de activo</TabsTrigger>
+          <TabsTrigger value="efectivo">Efectivo</TabsTrigger>
           <TabsTrigger value="benchmark">Benchmark</TabsTrigger>
           <TabsTrigger value="ajustes">Ajustes precio/FX</TabsTrigger>
           <TabsTrigger value="json">JSON</TabsTrigger>
@@ -239,6 +241,11 @@ export function Settings() {
         {/* ── Clases de activo ────────────────────────────────────── */}
         <TabsContent value="clases">
           <AssetClassEditor />
+        </TabsContent>
+
+        {/* ── Efectivo ────────────────────────────────────────────── */}
+        <TabsContent value="efectivo">
+          <CashEditor />
         </TabsContent>
 
         {/* ── Benchmark ───────────────────────────────────────────── */}

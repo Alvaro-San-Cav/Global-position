@@ -217,6 +217,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api Cash Get */
+        get: operations["api_cash_get_api_cash_get"];
+        put?: never;
+        /** Api Cash Post */
+        post: operations["api_cash_post_api_cash_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/asset-classes": {
         parameters: {
             query?: never;
@@ -372,6 +390,29 @@ export interface components {
             /** Files */
             files: string[];
         };
+        /** CashEntry */
+        CashEntry: {
+            /** Currency */
+            currency: string;
+            /** Amount */
+            amount: number;
+            /** Eur */
+            eur: number;
+        };
+        /** CashResponse */
+        CashResponse: {
+            /** Balances */
+            balances: components["schemas"]["CashEntry"][];
+            /** Total Eur */
+            total_eur: number;
+        };
+        /** CashUpdate */
+        CashUpdate: {
+            /** Balances */
+            balances: {
+                [key: string]: number;
+            };
+        };
         /** ClassSlice */
         ClassSlice: {
             /** Name */
@@ -493,6 +534,10 @@ export interface components {
             composition_full?: components["schemas"]["AssetSlice"][] | null;
             /** Portfolio Total Value */
             portfolio_total_value?: number | null;
+            /** Cash Total */
+            cash_total?: number | null;
+            /** Net Worth */
+            net_worth?: number | null;
             /** Top Assets */
             top_assets?: components["schemas"]["AssetSlice"][] | null;
             /** Class Breakdown */
@@ -1130,6 +1175,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OkResponse"];
+                };
+            };
+        };
+    };
+    api_cash_get_api_cash_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CashResponse"];
+                };
+            };
+        };
+    };
+    api_cash_post_api_cash_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CashUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CashResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

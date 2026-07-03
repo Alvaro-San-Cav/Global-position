@@ -74,6 +74,17 @@ export interface AssetClassesResponse {
   items: AssetClassItem[]
 }
 
+export interface CashEntry {
+  currency: string
+  amount: number
+  eur: number
+}
+
+export interface CashResponse {
+  balances: CashEntry[]
+  total_eur: number
+}
+
 export interface CorrelationAsset {
   name: string
   symbol: string
@@ -115,6 +126,8 @@ export interface DashboardResponse {
   composition?: AssetSlice[] | null
   composition_full?: AssetSlice[] | null
   portfolio_total_value?: number | null
+  cash_total?: number | null
+  net_worth?: number | null
   top_assets?: AssetSlice[] | null
   class_breakdown?: ClassSlice[] | null
   correlation?: Correlation | null

@@ -87,6 +87,22 @@ class AssetClassesResponse(BaseModel):
     items: list[AssetClassItem]
 
 
+class CashEntry(BaseModel):
+    currency: str
+    amount: float
+    eur: float
+
+
+class CashResponse(BaseModel):
+    balances: list[CashEntry]
+    total_eur: float
+
+
+class CashUpdate(BaseModel):
+    # {"EUR": 1234.56, "USD": 500}
+    balances: dict[str, float]
+
+
 class CorrelationAsset(BaseModel):
     name: str
     symbol: str
@@ -134,6 +150,8 @@ class DashboardResponse(BaseModel):
     composition: list[AssetSlice] | None = None
     composition_full: list[AssetSlice] | None = None
     portfolio_total_value: float | None = None
+    cash_total: float | None = None
+    net_worth: float | None = None
     top_assets: list[AssetSlice] | None = None
     class_breakdown: list[ClassSlice] | None = None
     correlation: Correlation | None = None
