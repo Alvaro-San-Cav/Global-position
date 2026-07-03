@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { AlertTriangle, PackageOpen } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { PageHeader } from '@/components/PageHeader'
@@ -59,6 +60,30 @@ export function Dashboard() {
   // slower dashboard price rebuild.
   const cashTotal = cash?.total_eur ?? data?.cash_total ?? 0
   const netWorth = (data?.portfolio_total_value ?? 0) + cashTotal
+
+  // Merge cash into the class breakdown on the client so it appears instantly
+  // when edited (the backend version only refreshes on a full price rebuild).
+  // Percentages are recomputed over the invested total + cash.
+  const classBreakdown = useMemo(() => {
+    const base = (data?.class_breakdown ?? []).filter((c) => c.name !== 'Efectivo')
+    const invested = base.reduce((a, c) => a + c.value, 0)
+    const grand = invested + cashTotal
+    if (grand <= 0) return base
+    const out = base.map((c) => ({ ...c, pct: (c.value / grand) * 100 }))
+    if (cashTotal > 0) {
+      out.push({
+        name: 'Efectivo',
+        value: cashTotal,
+        pct: (cashTotal / grand) * 100,
+        members: (cash?.balances ?? []).map((b) => ({
+          name: `Efectivo ${b.currency}`,
+          symbol: b.currency,
+          value: b.eur,
+        })),
+      })
+    }
+    return out.sort((a, b) => b.value - a.value)
+  }, [data?.class_breakdown, cash?.balances, cashTotal])
 
   const subtitle = data?.metrics?.fecha_actual
     ? `Análisis a ${fmtDate(data.metrics.fecha_actual)}`
@@ -123,13 +148,13 @@ export function Dashboard() {
             </Card>
           )}
 
-          {data.class_breakdown && data.class_breakdown.length > 0 && (
+          {classBreakdown.length > 0 && (
             <Card>
               <CardHeader>
                 <CardTitle>Desglose por clase de activo</CardTitle>
               </CardHeader>
               <CardContent>
-                <ClassBreakdown classes={data.class_breakdown} />
+                <ClassBreakdown classes={classBreakdown} />
               </CardContent>
             </Card>
           )}
