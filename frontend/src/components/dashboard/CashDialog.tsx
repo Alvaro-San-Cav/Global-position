@@ -13,7 +13,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useCash, useSaveCash } from '@/api/queries'
-import { fmtEur } from '@/lib/format'
+import { fmtEur, parseAmount } from '@/lib/format'
 
 interface Row {
   currency: string
@@ -45,7 +45,7 @@ export function CashDialog({ trigger }: { trigger: React.ReactNode }) {
     const balances: Record<string, number> = {}
     for (const r of rows) {
       const cur = r.currency.trim().toUpperCase()
-      const amt = parseFloat(r.amount)
+      const amt = parseAmount(r.amount)
       if (cur && !Number.isNaN(amt) && amt !== 0) balances[cur] = amt
     }
     try {
@@ -82,10 +82,10 @@ export function CashDialog({ trigger }: { trigger: React.ReactNode }) {
                 onChange={(e) => update(i, { currency: e.target.value.toUpperCase() })}
               />
               <Input
-                type="number"
-                step="0.01"
+                type="text"
+                inputMode="decimal"
                 value={r.amount}
-                placeholder="0.00"
+                placeholder="0,00"
                 autoFocus={i === 0}
                 onChange={(e) => update(i, { amount: e.target.value })}
               />

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fmtEur, fmtPct, fmtNum, fmtDate, signColor } from './format'
+import { fmtEur, fmtPct, fmtNum, fmtDate, signColor, parseAmount } from './format'
 
 describe('fmtEur', () => {
   it('formats euros in es-ES', () => {
@@ -53,5 +53,32 @@ describe('signColor', () => {
     expect(signColor(0)).toBe('text-green')
     expect(signColor(-1)).toBe('text-red')
     expect(signColor(null)).toBe('text-txt2')
+  })
+})
+
+describe('parseAmount', () => {
+  it('parses ES format (dot thousands, comma decimal)', () => {
+    expect(parseAmount('7.248,83')).toBe(7248.83)
+    expect(parseAmount('1.234.567,89')).toBe(1234567.89)
+    expect(parseAmount('12,5')).toBe(12.5)
+  })
+  it('parses EN format (comma thousands, dot decimal)', () => {
+    expect(parseAmount('7,248.83')).toBe(7248.83)
+    expect(parseAmount('1,000,000')).toBe(1000000)
+    expect(parseAmount('1234.5')).toBe(1234.5)
+  })
+  it('treats a lone dot with 3 trailing digits as thousands (ES)', () => {
+    expect(parseAmount('1.000')).toBe(1000)
+    expect(parseAmount('1.000.000')).toBe(1000000)
+  })
+  it('handles plain numbers, currency symbols and negatives', () => {
+    expect(parseAmount('1234')).toBe(1234)
+    expect(parseAmount('€7.248,83')).toBe(7248.83)
+    expect(parseAmount('-50,25')).toBe(-50.25)
+    expect(parseAmount(4000)).toBe(4000)
+  })
+  it('returns NaN for empty/garbage', () => {
+    expect(Number.isNaN(parseAmount(''))).toBe(true)
+    expect(Number.isNaN(parseAmount(null))).toBe(true)
   })
 })
