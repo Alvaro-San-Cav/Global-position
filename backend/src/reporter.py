@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt                        # noqa: E402
 import matplotlib.dates as mdates                      # noqa: E402
 from matplotlib.backends.backend_pdf import PdfPages   # noqa: E402
 from matplotlib.lines import Line2D                    # noqa: E402
-import numpy as np                                     # noqa: E402
 import pandas as pd                                    # noqa: E402
 
 from . import config

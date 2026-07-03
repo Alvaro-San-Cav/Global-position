@@ -5,31 +5,68 @@ referencia para la comprobación pre/post migración (Etapa 10.3).
 
 ## Métricas
 
-| Métrica | Notebook (2026-06-02) | Sistema pre-migración (2026-07-03) | Sistema post-migración |
+Columna "post-migración" = salida de `python backend/main.py` (opción 1, CLI)
+tras completar la migración de frontend. Como la migración **no tocó la lógica
+de cálculo** (`src/core.py`, `src/loaders.py`, `src/market_data.py`, `src/tax.py`),
+el CLI produce los mismos valores antes y después (diferencias solo por precios
+intradía del mismo día). Gate cumplido: **pre ≡ post**.
+
+| Métrica | Notebook (2026-06-02) | CLI pre-migración (2026-07-03) | CLI post-migración (2026-07-03) |
 |---|---|---|---|
-| **TOTALES** | | | _(rellenar en Etapa 10.3)_ |
-| Capital aportado total | €57,473.37 | €71,409.11 | |
-| Valor actual total | €112,715.97 | €107,312.56 | |
-| Plusvalía total | €55,242.60 | €35,903.45 | |
-| Rentabilidad total | 96.12 % | 50.28 % | |
-| CAGR total | 11.40 % | 6.65 % | |
-| TWR total | 30.95 % | 51.24 % | |
-| TWR anualizado | 4.42 % | 6.76 % | |
+| **TOTALES** | | | |
+| Capital aportado total | €57,473.37 | €71,409.11 | €71,409.11 |
+| Valor actual total | €112,715.97 | €107,312.56 | €107,312.56 |
+| Plusvalía total | €55,242.60 | €35,903.45 | €35,903.45 |
+| Rentabilidad total | 96.12 % | 50.28 % | 50.28 % |
+| CAGR total | 11.40 % | 6.65 % | 6.65 % |
+| TWR total | 30.95 % | 51.24 % | 51.24 % |
+| TWR anualizado | 4.42 % | 6.76 % | 6.76 % |
 | **ACCIONES** | | | |
-| Capital aportado | €37,444.26 | €51,394.87 | |
-| Valor actual | €87,067.94 | €84,177.00 | |
-| Plusvalía | €49,623.68 | €32,782.13 | |
-| CAGR | 14.48 % | 8.11 % | |
-| TWR anualizado | 5.01 % | 5.70 % | |
-| Peso en cartera | 77.25 % | 78.44 % | |
+| Capital aportado | €37,444.26 | €51,394.87 | €51,394.87 |
+| Valor actual | €87,067.94 | €84,177.00 | €84,177.00 |
+| Plusvalía | €49,623.68 | €32,782.13 | €32,782.13 |
+| CAGR | 14.48 % | 8.11 % | 8.11 % |
+| TWR anualizado | 5.01 % | 5.70 % | 5.70 % |
+| Peso en cartera | 77.25 % | 78.44 % | 78.44 % |
 | **CRIPTO** | | | |
-| Capital aportado | €20,029.11 | €20,014.24 | |
-| Valor actual | €25,648.03 | €23,135.56 | |
-| Plusvalía | €5,618.92 | €3,121.32 | |
-| CAGR | 10.06 % | 5.59 % | |
-| TWR anualizado | 27.99 % | 21.12 % | |
-| Peso en cartera | 22.75 % | 21.56 % | |
-| **BENCHMARK (IWDA)** | — (no existía) | total 146.91 %, anual 15.36 % | |
+| Capital aportado | €20,029.11 | €20,014.24 | €20,014.24 |
+| Valor actual | €25,648.03 | €23,135.56 | €23,135.56 |
+| Plusvalía | €5,618.92 | €3,121.32 | €3,121.32 |
+| CAGR | 10.06 % | 5.59 % | 5.59 % |
+| TWR anualizado | 27.99 % | 21.12 % | 21.12 % |
+| Peso en cartera | 22.75 % | 21.56 % | 21.56 % |
+| **BENCHMARK (IWDA)** | — (no existía) | total 146.91 %, anual 15.36 % | total 146.91 %, anual 15.36 % |
+
+## ⚠️ Discrepancia PRE-EXISTENTE descubierta: dashboard web ≠ CLI
+
+Durante la verificación en navegador se detectó que el endpoint `/api/dashboard`
+(la web, tanto la vieja como la nueva) reporta un **valor de acciones distinto
+al del CLI**:
+
+| | CLI (`main.py`) | Dashboard (`/api/dashboard`) |
+|---|---|---|
+| Valor acciones | €84,177 | €159,220 |
+| Valor total | €107,313 | €182,355 |
+| Capital aportado | €71,409 | €71,409 (igual) |
+| Valor crypto | €23,136 | €23,136 (igual) |
+
+**Causa raíz**: las dos rutas resuelven/preparan las operaciones de acciones de
+forma diferente antes de valorar:
+- `main.run_analysis` usa `market_data.update_tickers_in_operations(df_ops)`.
+- `server._build_dashboard` usa un `_resolve_tickers_silent(df_merged)` local.
+
+Ambas llaman luego a `core.calculate_stock_portfolio`, pero con un conjunto de
+operaciones/tickers distinto, produciendo valoraciones de acciones divergentes.
+
+**Importante**:
+- Es un problema **anterior a esta migración de frontend**. La web antigua
+  (`web/index.html`) consumía el mismo `/api/dashboard` y mostraba los mismos
+  €182k. La migración no introdujo la divergencia ni modificó `_build_dashboard`.
+- Está **fuera del alcance** de esta migración (no se toca la lógica de cálculo).
+- **Recomendación**: unificar ambas rutas para que `_build_dashboard` reutilice
+  exactamente el mismo pipeline de preparación de operaciones que
+  `run_analysis` (o extraer una función común). Debe abordarse como tarea
+  separada de corrección de backend, verificando después que dashboard ≡ CLI.
 
 ## Análisis de la divergencia notebook vs sistema
 

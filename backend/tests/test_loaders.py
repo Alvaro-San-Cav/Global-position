@@ -10,7 +10,6 @@ Tests cover:
   • validate_sources from config.py
 """
 
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -22,7 +21,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.loaders import clean_eu_float, process_new_transactions, save_operations
+from src.loaders import clean_eu_float, process_new_transactions
 from src import schemas, config
 
 FIXTURES = Path(__file__).parent / "fixtures"

@@ -15,7 +15,6 @@ Replicates the full notebook workflow as a consumable script:
 import sys
 import os
 
-import numpy as np
 import pandas as pd
 
 from src import config, loaders, market_data, core, reporter, tax
@@ -225,7 +224,7 @@ def process_crypto():
     try:
         df = loaders.process_crypto_transactions()
         if df is not None and len(df) > 0:
-            print(f"\n📊 Crypto summary:")
+            print("\n📊 Crypto summary:")
             print(f"   Total transactions: {len(df)}")
             for coin in df['Coin'].unique():
                 qty = df[df['Coin'] == coin]['Quantity'].sum()

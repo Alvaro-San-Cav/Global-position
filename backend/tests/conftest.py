@@ -5,7 +5,6 @@ Sets UTF-8 as the default I/O encoding on Windows (needed for emoji in
 print() calls captured by pytest under cp1252 consoles).
 """
 
-import io
 import sys
 
 

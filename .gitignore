@@ -37,3 +37,6 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 node_modules/
+
+# Local archive (large binaries; original notebook lives in GlobalPositionPersonal/)
+docs/archive/

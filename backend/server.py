@@ -25,7 +25,6 @@ import yfinance as yf
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
