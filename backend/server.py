@@ -17,10 +17,13 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import glob
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -29,10 +32,41 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src import config, core, loaders, market_data, tax
+from src.api_models import (
+    CryptoOperationCreate,
+    DashboardResponse,
+    OkResponse,
+    Operation,
+    OperationCreate,
+    CryptoOperation,
+    MutationResult,
+    ProcessResult,
+    ReportResult,
+    SourceData,
+    SourceFileInfo,
+    TaxResponse,
+    UploadResponse,
+)
 
-app = FastAPI(title="Global Position", docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="Global Position",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    redoc_url=None,
+)
 
-WEB_DIR = os.path.join(ROOT, "web")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Frontend build output (served in production). During Stage 2 the legacy
+# web/ folder at the repo root is still used; Stage 9 switches to frontend/dist.
+WEB_DIR = os.path.join(config.BASE_DIR, "frontend", "dist")
+if not os.path.isdir(WEB_DIR):
+    WEB_DIR = os.path.join(config.BASE_DIR, "web")
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -387,7 +421,12 @@ def _build_dashboard() -> dict:
 #  API routes  (must be declared BEFORE the static-file catch-all)
 # ─────────────────────────────────────────────────────────────────────────
 
-@app.get("/api/dashboard")
+@app.get("/api/health", response_model=OkResponse)
+def api_health():
+    return {"ok": True}
+
+
+@app.get("/api/dashboard", response_model=DashboardResponse)
 def api_dashboard(refresh: bool = False):
     global _dashboard_cache
     if not _dashboard_cache or refresh:
@@ -399,7 +438,7 @@ def api_dashboard(refresh: bool = False):
     return _dashboard_cache
 
 
-@app.get("/api/operations")
+@app.get("/api/operations", response_model=list[Operation])
 def api_operations():
     try:
         df = loaders.load_operations()
@@ -413,19 +452,17 @@ def api_operations():
         raise HTTPException(500, str(e))
 
 
-@app.post("/api/operations")
-async def api_operations_post(request: Request):
+@app.post("/api/operations", response_model=MutationResult)
+async def api_operations_post(body: OperationCreate):
     try:
-        body = await request.json()
-
-        date_raw = body.get("Date")
-        product = str(body.get("Product", "")).strip()
-        isin = str(body.get("ISIN", "")).strip()
-        quantity = pd.to_numeric(body.get("Quantity"), errors="coerce")
-        price = pd.to_numeric(body.get("Price"), errors="coerce")
-        coin = str(body.get("Coin", "")).strip().upper() or "EUR"
-        ticker = str(body.get("ticker", "")).strip()
-        value_raw = body.get("Value", None)
+        date_raw = body.Date
+        product = str(body.Product or "").strip()
+        isin = str(body.ISIN or "").strip()
+        quantity = pd.to_numeric(body.Quantity, errors="coerce")
+        price = pd.to_numeric(body.Price, errors="coerce")
+        coin = str(body.Coin or "").strip().upper() or "EUR"
+        ticker = str(body.ticker or "").strip()
+        value_raw = body.Value
 
         dt = pd.to_datetime(date_raw, errors="coerce")
         if pd.isna(dt):
@@ -475,7 +512,7 @@ async def api_operations_post(request: Request):
         raise HTTPException(500, str(e))
 
 
-@app.get("/api/crypto")
+@app.get("/api/crypto", response_model=list[CryptoOperation])
 def api_crypto():
     try:
         df = loaders.load_crypto_operations()
@@ -488,16 +525,14 @@ def api_crypto():
         raise HTTPException(500, str(e))
 
 
-@app.post("/api/crypto")
-async def api_crypto_post(request: Request):
+@app.post("/api/crypto", response_model=MutationResult)
+async def api_crypto_post(body: CryptoOperationCreate):
     try:
-        body = await request.json()
-
-        date_raw = body.get("Date")
-        coin = str(body.get("Coin", "")).strip().upper()
-        quantity = pd.to_numeric(body.get("Quantity"), errors="coerce")
-        product = str(body.get("Product", "")).strip()
-        ticker = str(body.get("ticker", "")).strip()
+        date_raw = body.Date
+        coin = str(body.Coin or "").strip().upper()
+        quantity = pd.to_numeric(body.Quantity, errors="coerce")
+        product = str(body.Product or "").strip()
+        ticker = str(body.ticker or "").strip()
 
         dt = pd.to_datetime(date_raw, errors="coerce")
         if pd.isna(dt):
@@ -535,7 +570,7 @@ async def api_crypto_post(request: Request):
         raise HTTPException(500, str(e))
 
 
-@app.get("/api/tax")
+@app.get("/api/tax", response_model=TaxResponse)
 def api_tax():
     try:
         df = loaders.load_operations()
@@ -581,7 +616,7 @@ def api_sources_get():
         raise HTTPException(500, str(e))
 
 
-@app.post("/api/sources")
+@app.post("/api/sources", response_model=OkResponse)
 async def api_sources_post(request: Request):
     try:
         body = await request.json()
@@ -594,7 +629,7 @@ async def api_sources_post(request: Request):
         raise HTTPException(500, str(e))
 
 
-@app.post("/api/upload")
+@app.post("/api/upload", response_model=UploadResponse)
 async def api_upload(files: list[UploadFile] = File(...)):
     os.makedirs(config.INPUT_DIR, exist_ok=True)
     saved = []
@@ -607,7 +642,7 @@ async def api_upload(files: list[UploadFile] = File(...)):
     return {"saved": saved}
 
 
-@app.get("/api/source-data")
+@app.get("/api/source-data", response_model=list[SourceData])
 def api_source_data():
     """Return parsed vest/position entries from all enabled stock sources."""
     import fnmatch
@@ -663,7 +698,7 @@ def api_source_data():
     return result
 
 
-@app.get("/api/pending-files")
+@app.get("/api/pending-files", response_model=list[str])
 def api_pending():
     if not os.path.exists(config.INPUT_DIR):
         return []
@@ -687,7 +722,7 @@ def api_pending():
     ]
 
 
-@app.get("/api/source-files")
+@app.get("/api/source-files", response_model=list[SourceFileInfo])
 def api_source_files():
     """List files in input/ that are permanent source files (match a sources.json pattern)."""
     import fnmatch
@@ -713,7 +748,7 @@ def api_source_files():
     return result
 
 
-@app.delete("/api/pending-files/{filename}")
+@app.delete("/api/pending-files/{filename}", response_model=OkResponse)
 def api_delete_pending(filename: str):
     path = os.path.join(config.INPUT_DIR, filename)
     if os.path.exists(path):
@@ -722,11 +757,91 @@ def api_delete_pending(filename: str):
     raise HTTPException(404, "File not found")
 
 
-@app.get("/api/invalidate")
+@app.get("/api/invalidate", response_model=OkResponse)
 def api_invalidate():
     global _dashboard_cache
     _dashboard_cache = {}
     return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Ingesta + informes
+# ─────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/process", response_model=ProcessResult)
+def api_process():
+    """Ingest pending CSVs from input/ into processing/ (mirrors CLI opts 2 & 3)."""
+    global _dashboard_cache
+    stock_added = 0
+    crypto_added = 0
+    files_seen: list[str] = []
+    try:
+        if os.path.isdir(config.INPUT_DIR):
+            files_seen = [f for f in os.listdir(config.INPUT_DIR) if f.lower().endswith(".csv")]
+
+        # Stocks
+        try:
+            df_ops = loaders.load_operations()
+            before = len(df_ops)
+            df_updated = loaders.process_new_transactions(df_ops)
+            df_updated = market_data.update_tickers_in_operations(df_updated)
+            loaders.save_operations(df_updated)
+            stock_added = max(0, len(df_updated) - before)
+        except Exception as e:
+            config.get_logger().warning(f"api_process stocks: {e}")
+
+        # Crypto
+        try:
+            df_crypto_before = loaders.load_crypto_operations()
+            before_c = 0 if df_crypto_before is None else len(df_crypto_before)
+            df_c = loaders.process_crypto_transactions()
+            crypto_added = max(0, (0 if df_c is None else len(df_c)) - before_c)
+        except Exception as e:
+            config.get_logger().warning(f"api_process crypto: {e}")
+
+        _dashboard_cache = {}
+        return {
+            "ok": True,
+            "stock_added": stock_added,
+            "crypto_added": crypto_added,
+            "files": files_seen,
+            "message": f"{stock_added} operaciones y {crypto_added} movimientos crypto añadidos.",
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+def _latest_report() -> str | None:
+    pdfs = glob.glob(os.path.join(config.OUTPUT_DIR, "resumen_cartera_*.pdf"))
+    return max(pdfs, key=os.path.getmtime) if pdfs else None
+
+
+@app.get("/api/report/pdf")
+def api_report_pdf():
+    path = _latest_report()
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, "No hay informe generado todavía.")
+    return FileResponse(path, media_type="application/pdf", filename=os.path.basename(path))
+
+
+@app.post("/api/report/generate", response_model=ReportResult)
+def api_report_generate():
+    """Run the full pipeline and generate a fresh PDF report."""
+    global _dashboard_cache
+    try:
+        import main  # lazy: avoids importing the CLI menu at server startup
+        main.run_analysis()
+        _dashboard_cache = {}
+        path = _latest_report()
+        return {
+            "ok": True,
+            "file": os.path.basename(path) if path else None,
+            "message": "Informe generado.",
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
 
 
 # ─────────────────────────────────────────────────────────────────────────
