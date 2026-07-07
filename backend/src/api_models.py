@@ -103,6 +103,56 @@ class CashUpdate(BaseModel):
     balances: dict[str, float]
 
 
+class ClassLimit(BaseModel):
+    min: float | None = None
+    max: float | None = None
+
+
+class CashBuffer(BaseModel):
+    pct: float = 0.0
+    amount: float = 0.0
+
+
+class TargetConfig(BaseModel):
+    """Target ("cartera tipo") + diversification rules stored in sources.json."""
+    targets: dict[str, float] = {}                 # {asset_class: pct}
+    band_pct: float = 0.0                          # tolerance band ±%
+    max_asset_pct: float | None = None             # single-asset max weight
+    class_limits: dict[str, ClassLimit] = {}       # per-class min/max
+    cash_buffer: CashBuffer = CashBuffer()
+
+
+class RebalanceRow(BaseModel):
+    asset_class: str
+    target_pct: float
+    target_eur: float
+    actual_pct: float
+    actual_eur: float
+    drift_pct: float
+    band_pct: float
+    within_band: bool
+    action_eur: float          # +buy / -sell
+    status: str                # "ok" | "comprar" | "vender"
+
+
+class RebalanceViolation(BaseModel):
+    kind: str                  # max_asset | class_min | class_max | cash_buffer
+    target: str
+    message: str
+    actual_pct: float
+    limit_pct: float
+
+
+class RebalanceResponse(BaseModel):
+    configured: bool
+    net_worth: float
+    target_sum_pct: float
+    band_pct: float
+    rows: list[RebalanceRow]
+    violations: list[RebalanceViolation]
+    note: str = ""
+
+
 class CorrelationAsset(BaseModel):
     name: str
     symbol: str
@@ -227,6 +277,35 @@ class ProcessResult(BaseModel):
     message: str = ""
 
 
+class PreviewFile(BaseModel):
+    file: str
+    kind: str                       # "stock" | "crypto"
+    source: str | None = None
+    rows_read: int = 0
+    new: int = 0
+    duplicates: int = 0
+    # Stock rows: {date, product, isin, quantity, price, value}
+    # Crypto rows: {date, coin, quantity, ticker}
+    entries: list[dict] = []
+    error: str | None = None
+
+
+class ProcessPreview(BaseModel):
+    files: list[PreviewFile] = []
+    total_new: int = 0
+    total_duplicates: int = 0
+
+
+class ProcessCommitFile(BaseModel):
+    file: str
+    kind: str                       # "stock" | "crypto"
+    entries: list[dict] = []        # edited rows the user confirmed
+
+
+class ProcessCommit(BaseModel):
+    files: list[ProcessCommitFile] = []
+
+
 class ReportResult(BaseModel):
     ok: bool
     file: str | None = None
@@ -237,6 +316,12 @@ class SourceFileInfo(BaseModel):
     file: str
     source: str
     enabled: bool
+
+
+class SourceFileContent(BaseModel):
+    file: str
+    columns: list[str]
+    rows: list[list[str]]         # raw cell values, one inner list per row
 
 
 class SourceDataEntry(BaseModel):

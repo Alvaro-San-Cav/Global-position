@@ -85,6 +85,22 @@ export function Dashboard() {
     return out.sort((a, b) => b.value - a.value)
   }, [data?.class_breakdown, cash?.balances, cashTotal])
 
+  // Include cash as an "Efectivo" slice in the composition donut so the
+  // percentages are computed over the full portfolio (invested + cash).
+  const compositionTotal = (data?.portfolio_total_value ?? 0) + cashTotal
+  const compositionWithCash = useMemo(() => {
+    const base = data?.composition ?? []
+    if (cashTotal <= 0) return base
+    return [...base, { name: 'Efectivo', symbol: '', value: cashTotal }]
+  }, [data?.composition, cashTotal])
+  const topAssetsWithCash = useMemo(() => {
+    const base = data?.top_assets ?? []
+    if (cashTotal <= 0) return base
+    return [...base, { name: 'Efectivo', symbol: '', value: cashTotal }].sort(
+      (a, b) => b.value - a.value,
+    )
+  }, [data?.top_assets, cashTotal])
+
   const subtitle = data?.metrics?.fecha_actual
     ? `Análisis a ${fmtDate(data.metrics.fecha_actual)}`
     : 'Posición global de la cartera'
@@ -119,15 +135,19 @@ export function Dashboard() {
           <KpiGrid metrics={data.metrics} />
 
           {cashTotal > 0 && (
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-[var(--radius-card)] border border-border-subtle bg-card px-4 py-3 text-sm">
-              <span className="text-txt2">
-                Efectivo:{' '}
-                <span className="font-medium text-txt">{fmtEur(cashTotal)}</span>
-              </span>
-              <span className="text-txt2">
-                Patrimonio total (inversión + efectivo):{' '}
-                <span className="font-semibold text-accent2">{fmtEur(netWorth)}</span>
-              </span>
+            <div className="flex flex-wrap items-center gap-x-10 gap-y-3 rounded-[var(--radius-card)] border border-accent2/40 bg-accent2/10 px-6 py-5">
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-txt2">
+                  Efectivo
+                </span>
+                <span className="text-2xl font-semibold text-txt">{fmtEur(cashTotal)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-txt2">
+                  Patrimonio total (inversión + efectivo)
+                </span>
+                <span className="text-3xl font-bold text-accent2">{fmtEur(netWorth)}</span>
+              </div>
             </div>
           )}
 
@@ -160,16 +180,16 @@ export function Dashboard() {
           )}
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {data.composition && data.composition.length > 0 && (
+            {compositionWithCash.length > 0 && (
               <Card>
                 <CardHeader>
                   <CardTitle>Composición actual</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <CompositionDonut
-                    composition={data.composition}
-                    topAssets={data.top_assets ?? []}
-                    totalValue={data.portfolio_total_value ?? 0}
+                    composition={compositionWithCash}
+                    topAssets={topAssetsWithCash}
+                    totalValue={compositionTotal}
                   />
                 </CardContent>
               </Card>

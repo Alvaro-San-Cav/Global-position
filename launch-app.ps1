@@ -14,6 +14,39 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $url  = 'http://localhost:8000'
 
+# ── 0. Reconstruir el frontend si el código es más nuevo que el build ─────
+# Evita abrir una versión vieja tras editar el frontend sin recordar 'build'.
+function Update-FrontendBuild {
+    $src  = Join-Path $root 'frontend\src'
+    $dist = Join-Path $root 'frontend\dist\index.html'
+    if (-not (Test-Path $src)) { return }
+
+    $needsBuild = $true
+    if (Test-Path $dist) {
+        $distTime = (Get-Item $dist).LastWriteTimeUtc
+        $newest = Get-ChildItem $src -Recurse -File -ErrorAction SilentlyContinue |
+                  Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        # Sólo reconstruir si hay fuente más nueva que el build actual.
+        $needsBuild = $newest -and ($newest.LastWriteTimeUtc -gt $distTime)
+    }
+    if (-not $needsBuild) { return }
+
+    $pnpm = (Get-Command pnpm -ErrorAction SilentlyContinue)
+    if (-not $pnpm) { return }   # sin pnpm: abrir lo que haya
+
+    Push-Location (Join-Path $root 'frontend')
+    try {
+        Write-Host 'Reconstruyendo frontend (cambios detectados)...'
+        & pnpm build | Out-Null
+    } catch {
+        Write-Warning "Fallo al reconstruir el frontend: $_"
+    } finally {
+        Pop-Location
+    }
+}
+
+Update-FrontendBuild
+
 function Test-Port8000 {
     try {
         $c = New-Object Net.Sockets.TcpClient

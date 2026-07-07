@@ -7,6 +7,7 @@ import {
   Play,
   Loader2,
   AlertTriangle,
+  Pencil,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import {
@@ -30,17 +31,20 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dropzone } from '@/components/import/Dropzone'
 import { ConfirmDeleteDialog } from '@/components/import/ConfirmDeleteDialog'
+import { ProcessPreviewDialog } from '@/components/import/ProcessPreviewDialog'
+import { SourceFileEditor } from '@/components/import/SourceFileEditor'
 import {
   useUpload,
   usePendingFiles,
   useDeletePending,
   useSourceFiles,
   useSourceData,
-  useProcess,
+  useProcessPreview,
+  useProcessCommit,
 } from '@/api/queries'
 import { fmtEur, fmtNum, fmtDate } from '@/lib/format'
 import { ApiError } from '@/api/client'
-import type { SourceData } from '@/api/types'
+import type { SourceData, ProcessPreview, ProcessCommitFile } from '@/api/types'
 
 function errMsg(e: unknown): string {
   if (e instanceof ApiError) return e.message
@@ -54,9 +58,12 @@ export function Import() {
   const deletePending = useDeletePending()
   const sourceFiles = useSourceFiles()
   const sourceData = useSourceData()
-  const process = useProcess()
+  const processPreview = useProcessPreview()
+  const processCommit = useProcessCommit()
 
   const [toDelete, setToDelete] = useState<string | null>(null)
+  const [preview, setPreview] = useState<ProcessPreview | null>(null)
+  const [editFile, setEditFile] = useState<{ file: string; title: string } | null>(null)
 
   async function handleUpload(files: File[]) {
     try {
@@ -78,12 +85,28 @@ export function Import() {
     }
   }
 
-  async function handleProcess() {
+  // Step 1: fetch a non-destructive preview of what would be added.
+  async function handlePreview() {
     try {
-      const res = await process.mutateAsync()
-      toast.success(res.message || 'Procesado correctamente')
+      const res = await processPreview.mutateAsync()
+      if (res.files.length === 0) {
+        toast.info('No hay archivos pendientes que procesar.')
+        return
+      }
+      setPreview(res)
     } catch (e) {
-      toast.error(`Error al procesar: ${errMsg(e)}`)
+      toast.error(`Error al previsualizar: ${errMsg(e)}`)
+    }
+  }
+
+  // Step 2: user confirmed (with any edits) → commit the exact rows.
+  async function handleConfirmProcess(files: ProcessCommitFile[]) {
+    try {
+      const res = await processCommit.mutateAsync({ files })
+      toast.success(res.message || 'Guardado correctamente')
+      setPreview(null)
+    } catch (e) {
+      toast.error(`Error al guardar: ${errMsg(e)}`)
     }
   }
 
@@ -94,10 +117,10 @@ export function Import() {
         subtitle="Sube CSV de transacciones, revisa los archivos fuente y procesa los pendientes."
         actions={
           <Button
-            onClick={handleProcess}
-            disabled={process.isPending}
+            onClick={handlePreview}
+            disabled={processPreview.isPending || processCommit.isPending}
           >
-            {process.isPending ? (
+            {processPreview.isPending ? (
               <Loader2 className="animate-spin" />
             ) : (
               <Play />
@@ -219,7 +242,18 @@ export function Import() {
           ) : (
             <div className="grid gap-4 md:grid-cols-2">
               {sourceData.data.map((sd) => (
-                <SourceDataCard key={`${sd.source}-${sd.file}`} data={sd} />
+                <SourceDataCard
+                  key={`${sd.source}-${sd.file}`}
+                  data={sd}
+                  onEdit={() =>
+                    setEditFile({
+                      file: sd.file,
+                      title: [sd.source, sd.ticker ?? sd.product ?? sd.coin]
+                        .filter(Boolean)
+                        .join(' · '),
+                    })
+                  }
+                />
               ))}
             </div>
           )}
@@ -233,6 +267,23 @@ export function Import() {
         }}
         onConfirm={handleDelete}
         busy={deletePending.isPending}
+      />
+
+      <ProcessPreviewDialog
+        preview={preview}
+        onOpenChange={(open) => {
+          if (!open && !processCommit.isPending) setPreview(null)
+        }}
+        onConfirm={handleConfirmProcess}
+        busy={processCommit.isPending}
+      />
+
+      <SourceFileEditor
+        filename={editFile?.file ?? null}
+        title={editFile?.title}
+        onOpenChange={(open) => {
+          if (!open) setEditFile(null)
+        }}
       />
     </div>
   )
@@ -264,16 +315,32 @@ function FileChip({
   )
 }
 
-function SourceDataCard({ data }: { data: SourceData }) {
+function SourceDataCard({
+  data,
+  onEdit,
+}: {
+  data: SourceData
+  onEdit: () => void
+}) {
   const title = [data.source, data.ticker ?? data.product ?? data.coin]
     .filter(Boolean)
     .join(' · ')
 
+  // Show most recent first (dates are ISO "YYYY-MM-DD", so string sort works).
+  const entries = [...data.entries].sort((a, b) => b.date.localeCompare(a.date))
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{title || data.source}</CardTitle>
-        <CardDescription>{data.file}</CardDescription>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <CardTitle>{title || data.source}</CardTitle>
+            <CardDescription>{data.file}</CardDescription>
+          </div>
+          <Button variant="outline" size="sm" onClick={onEdit}>
+            <Pencil className="size-3.5" /> Editar
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         {data.error ? (
@@ -294,7 +361,7 @@ function SourceDataCard({ data }: { data: SourceData }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.entries.map((e, i) => (
+              {entries.map((e, i) => (
                 <TableRow key={`${e.date}-${i}`}>
                   <TableCell className="whitespace-nowrap text-txt2">
                     {fmtDate(e.date)}

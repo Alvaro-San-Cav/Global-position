@@ -188,6 +188,12 @@ export interface SourceFileInfo {
   enabled: boolean
 }
 
+export interface SourceFileContent {
+  file: string
+  columns: string[]
+  rows: string[][]
+}
+
 export interface SourceDataEntry {
   date: string
   quantity: number
@@ -215,6 +221,50 @@ export interface ProcessResult {
   message: string
 }
 
+export interface PreviewStockEntry {
+  date: string
+  product?: string | null
+  isin?: string | null
+  quantity?: number | null
+  price?: number | null
+  coin?: string | null
+  value?: number | null
+}
+
+export interface PreviewCryptoEntry {
+  date: string
+  coin: string
+  quantity: number
+  ticker: string
+}
+
+export interface PreviewFile {
+  file: string
+  kind: 'stock' | 'crypto'
+  source?: string | null
+  rows_read: number
+  new: number
+  duplicates: number
+  entries: (PreviewStockEntry | PreviewCryptoEntry)[]
+  error?: string | null
+}
+
+export interface ProcessPreview {
+  files: PreviewFile[]
+  total_new: number
+  total_duplicates: number
+}
+
+export interface ProcessCommitFile {
+  file: string
+  kind: 'stock' | 'crypto'
+  entries: (PreviewStockEntry | PreviewCryptoEntry)[]
+}
+
+export interface ProcessCommit {
+  files: ProcessCommitFile[]
+}
+
 export interface ReportResult {
   ok: boolean
   file?: string | null
@@ -223,3 +273,54 @@ export interface ReportResult {
 
 /** sources.json shape (loose — the raw JSON editor handles unknown keys). */
 export type SourcesConfig = Record<string, unknown>
+
+// ── Cartera objetivo (target portfolio) ──────────────────────────────────
+
+export interface ClassLimit {
+  min?: number | null
+  max?: number | null
+}
+
+export interface CashBuffer {
+  pct: number
+  amount: number
+}
+
+export interface TargetConfig {
+  targets: Record<string, number>
+  band_pct: number
+  max_asset_pct?: number | null
+  class_limits: Record<string, ClassLimit>
+  cash_buffer: CashBuffer
+}
+
+export interface RebalanceRow {
+  asset_class: string
+  target_pct: number
+  target_eur: number
+  actual_pct: number
+  actual_eur: number
+  drift_pct: number
+  band_pct: number
+  within_band: boolean
+  action_eur: number
+  status: 'ok' | 'comprar' | 'vender'
+}
+
+export interface RebalanceViolation {
+  kind: 'max_asset' | 'class_min' | 'class_max' | 'cash_buffer'
+  target: string
+  message: string
+  actual_pct: number
+  limit_pct: number
+}
+
+export interface RebalanceResponse {
+  configured: boolean
+  net_worth: number
+  target_sum_pct: number
+  band_pct: number
+  rows: RebalanceRow[]
+  violations: RebalanceViolation[]
+  note: string
+}

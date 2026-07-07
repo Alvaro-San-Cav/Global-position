@@ -32,10 +32,13 @@ if ROOT not in sys.path:
 
 from src import cash as cash_store
 from src import config, core, loaders, market_data, tax
+from src import target as target_engine
 from src.api_models import (
     AssetClassesResponse,
     CashResponse,
     CashUpdate,
+    RebalanceResponse,
+    TargetConfig,
     CryptoOperationCreate,
     DashboardResponse,
     OkResponse,
@@ -43,9 +46,12 @@ from src.api_models import (
     OperationCreate,
     CryptoOperation,
     MutationResult,
+    ProcessCommit,
+    ProcessPreview,
     ProcessResult,
     ReportResult,
     SourceData,
+    SourceFileContent,
     SourceFileInfo,
     TaxResponse,
     UploadResponse,
@@ -792,6 +798,63 @@ def api_source_files():
     return result
 
 
+def _resolve_source_file(filename: str) -> str:
+    """Sanitise `filename` and return its absolute path in input/, ensuring it
+    is a .csv matching a configured source pattern. Raises HTTPException."""
+    import fnmatch
+    safe = os.path.basename(filename)            # strip any path traversal
+    if safe != filename or not safe.lower().endswith(".csv"):
+        raise HTTPException(400, "Nombre de archivo no válido.")
+
+    sources = config.load_sources()
+    patterns = [
+        s.get("file_pattern", "").lower()
+        for s in sources.get("stock_sources", []) + sources.get("crypto_sources", [])
+        if s.get("file_pattern")
+    ]
+    if not any(fnmatch.fnmatch(safe.lower(), p) for p in patterns):
+        raise HTTPException(403, "El archivo no es una fuente configurada.")
+
+    path = os.path.join(config.INPUT_DIR, safe)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Archivo no encontrado.")
+    return path
+
+
+@app.get("/api/source-file/{filename}", response_model=SourceFileContent)
+def api_source_file_get(filename: str):
+    """Return the raw CSV (columns + string cells) of a configured source file."""
+    path = _resolve_source_file(filename)
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    df.columns = [str(c).strip() for c in df.columns]
+    return {
+        "file": os.path.basename(path),
+        "columns": list(df.columns),
+        "rows": df.astype(str).values.tolist(),
+    }
+
+
+@app.put("/api/source-file/{filename}", response_model=SourceFileContent)
+def api_source_file_put(filename: str, body: SourceFileContent):
+    """Overwrite a configured source file with edited rows (with backup)."""
+    path = _resolve_source_file(filename)
+    if not body.columns:
+        raise HTTPException(400, "Se requiere al menos una columna.")
+    # Coerce every row to the column count (pad/truncate) to keep the CSV valid.
+    ncol = len(body.columns)
+    norm_rows = [(r + [""] * ncol)[:ncol] for r in body.rows]
+
+    loaders._backup_file(path)
+    df = pd.DataFrame(norm_rows, columns=body.columns)
+    df.to_csv(path, index=False)
+    config.get_logger().info(
+        f"api_source_file_put: {len(norm_rows)} filas guardadas → {path}"
+    )
+    global _dashboard_cache
+    _dashboard_cache = {}
+    return {"file": os.path.basename(path), "columns": body.columns, "rows": norm_rows}
+
+
 @app.delete("/api/pending-files/{filename}", response_model=OkResponse)
 def api_delete_pending(filename: str):
     path = os.path.join(config.INPUT_DIR, filename)
@@ -900,8 +963,79 @@ def api_asset_classes():
 
 
 # ─────────────────────────────────────────────────────────────────────────
+#  Cartera objetivo (target portfolio) + rebalanceo
+# ─────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/target", response_model=TargetConfig)
+def api_target_get():
+    """Return the stored target ("cartera tipo") + diversification rules."""
+    try:
+        return TargetConfig(**config.get_target_portfolio())
+    except Exception:
+        # Corrupt/legacy content → return defaults rather than 500.
+        return TargetConfig()
+
+
+@app.post("/api/target", response_model=TargetConfig)
+def api_target_post(body: TargetConfig):
+    """Persist the target config; invalidate the dashboard cache."""
+    try:
+        config.save_target_portfolio(body.model_dump())
+        global _dashboard_cache
+        _dashboard_cache = {}
+        return body
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/rebalance", response_model=RebalanceResponse)
+def api_rebalance():
+    """Control panel: what to do to hit the target vs current holdings (cartera+cash).
+
+    Reuses the dashboard computation (net worth + class breakdown incl. cash),
+    so it reflects the exact same figures shown on the Dashboard.
+    """
+    global _dashboard_cache
+    try:
+        if not _dashboard_cache:
+            _dashboard_cache = _build_dashboard()
+        dash = _dashboard_cache
+        if dash.get("error"):
+            raise HTTPException(400, dash["error"])
+        net_worth = dash.get("net_worth") or 0.0
+        class_breakdown = dash.get("class_breakdown") or []
+        cfg = config.get_target_portfolio()
+        return target_engine.compute_rebalance(net_worth, class_breakdown, cfg)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────
 #  Ingesta + informes
 # ─────────────────────────────────────────────────────────────────────────
+
+@app.post("/api/process/preview", response_model=ProcessPreview)
+def api_process_preview():
+    """Detect what /api/process WOULD add, without saving or deleting anything.
+    Powers the confirmation preview shown before committing new transactions."""
+    files: list[dict] = []
+    try:
+        df_ops = loaders.load_operations()
+        files.extend(loaders.preview_new_transactions(df_ops))
+    except Exception as e:
+        config.get_logger().warning(f"api_process_preview stocks: {e}")
+    try:
+        files.extend(loaders.preview_new_crypto_transactions())
+    except Exception as e:
+        config.get_logger().warning(f"api_process_preview crypto: {e}")
+
+    total_new = sum(f.get("new", 0) for f in files)
+    total_dup = sum(f.get("duplicates", 0) for f in files)
+    return {"files": files, "total_new": total_new, "total_duplicates": total_dup}
+
 
 @app.post("/api/process", response_model=ProcessResult)
 def api_process():
@@ -919,7 +1053,7 @@ def api_process():
             df_ops = loaders.load_operations()
             before = len(df_ops)
             df_updated = loaders.process_new_transactions(df_ops)
-            df_updated = market_data.update_tickers_in_operations(df_updated)
+            df_updated = _resolve_tickers_silent(df_updated)
             loaders.save_operations(df_updated)
             stock_added = max(0, len(df_updated) - before)
         except Exception as e:
@@ -941,6 +1075,105 @@ def api_process():
             "crypto_added": crypto_added,
             "files": files_seen,
             "message": f"{stock_added} operaciones y {crypto_added} movimientos crypto añadidos.",
+        }
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
+
+
+def _to_float(v, default=0.0) -> float:
+    """Parse a possibly-string/European number into float."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default
+    try:
+        return float(str(v).replace('"', '').replace(',', '.'))
+    except ValueError:
+        return default
+
+
+@app.post("/api/process/commit", response_model=ProcessResult)
+def api_process_commit(body: ProcessCommit):
+    """Persist the (possibly edited) rows the user confirmed in the preview,
+    then delete the source files from input/. Unlike /api/process this saves
+    exactly what the client sends — supporting edit/delete before saving."""
+    global _dashboard_cache
+    stock_rows: list[dict] = []
+    crypto_rows: list[dict] = []
+    files_to_delete: set[str] = set()
+
+    for f in body.files:
+        files_to_delete.add(os.path.basename(f.file))
+        if f.kind == "crypto":
+            for e in f.entries:
+                coin = str(e.get("coin", "")).strip().upper()
+                if not coin:
+                    continue
+                crypto_rows.append({
+                    "Date": e.get("date"),
+                    "Product": coin,
+                    "Coin": coin,
+                    "Quantity": _to_float(e.get("quantity")),
+                    "ticker": e.get("ticker") or f"{coin}-EUR",
+                })
+        else:
+            for e in f.entries:
+                stock_rows.append({
+                    "Date": e.get("date"),
+                    "Product": e.get("product") or "",
+                    "ISIN": e.get("isin") or "",
+                    "Quantity": _to_float(e.get("quantity")),
+                    "Price": _to_float(e.get("price")),
+                    "Coin": e.get("coin") or "EUR",
+                    "Value": _to_float(e.get("value")),
+                    "eur": "EUR",
+                })
+
+    stock_added = 0
+    crypto_added = 0
+    try:
+        if stock_rows:
+            df_ops = loaders.load_operations()
+            before = len(df_ops)
+            df_new = pd.DataFrame(stock_rows)
+            df_new["Date"] = pd.to_datetime(df_new["Date"], errors="coerce")
+            df_ops = pd.concat([df_ops, df_new], ignore_index=True)
+            df_ops = df_ops.sort_values("Date", kind="mergesort")
+            # Resolve tickers silently — never prompt on stdin (server context).
+            df_ops = _resolve_tickers_silent(df_ops)
+            loaders.save_operations(df_ops)
+            stock_added = len(df_ops) - before
+
+        if crypto_rows:
+            df_c = loaders.load_crypto_operations()
+            before_c = 0 if df_c is None else len(df_c)
+            df_cn = pd.DataFrame(crypto_rows)
+            df_cn["Date"] = pd.to_datetime(df_cn["Date"], errors="coerce")
+            df_c = pd.concat([df_c, df_cn], ignore_index=True) if before_c else df_cn
+            df_c = df_c.sort_values("Date", kind="mergesort")
+            loaders.save_crypto_operations(df_c)
+            crypto_added = len(df_c) - before_c
+
+        # Remove the confirmed source files from input/.
+        deleted: list[str] = []
+        for fn in files_to_delete:
+            if not fn.lower().endswith(".csv"):
+                continue
+            p = os.path.join(config.INPUT_DIR, fn)
+            if os.path.isfile(p):
+                os.remove(p)
+                deleted.append(fn)
+
+        _dashboard_cache = {}
+        config.get_logger().info(
+            f"api_process_commit: stock={stock_added} crypto={crypto_added} "
+            f"archivos_borrados={deleted}"
+        )
+        return {
+            "ok": True,
+            "stock_added": stock_added,
+            "crypto_added": crypto_added,
+            "files": deleted,
+            "message": f"{stock_added} operaciones y {crypto_added} movimientos crypto guardados.",
         }
     except Exception as e:
         traceback.print_exc()
@@ -983,9 +1216,19 @@ def api_report_generate():
 #  Static files + SPA fallback
 # ─────────────────────────────────────────────────────────────────────────
 
+# index.html must never be cached: it references the hashed asset bundles, so a
+# stale copy would keep loading an old build. The hashed assets themselves are
+# immutable (their name changes on every build) and can be cached normally.
+_NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+
+
+def _index_response() -> FileResponse:
+    return FileResponse(os.path.join(WEB_DIR, "index.html"), headers=_NO_CACHE)
+
+
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    return _index_response()
 
 
 @app.get("/{path:path}")
@@ -993,7 +1236,7 @@ def spa_fallback(path: str):
     full = os.path.join(WEB_DIR, path)
     if os.path.isfile(full):
         return FileResponse(full)
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    return _index_response()
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -83,21 +83,13 @@ def load_operations() -> pd.DataFrame:
     return df.sort_values('Date', kind='mergesort')
 
 
-def process_new_transactions(df_ops: pd.DataFrame) -> pd.DataFrame:
-    """
-    Scan input/ for new Degiro-format CSV files, deduplicate against
-    existing df_ops, concatenate, sort and return the updated DF.
-    Processed files are deleted from input/.
-
-    Files matching any custom stock-source pattern or any crypto-source
-    pattern in sources.json are skipped here (they have their own loader).
-    """
+def _pending_transaction_files() -> list[str]:
+    """Names of CSVs in input/ that are generic Degiro transaction files
+    (i.e. NOT matched by any custom stock/crypto source pattern)."""
     input_dir = config.INPUT_DIR
     if not os.path.exists(input_dir):
-        print("ℹ️  input/ folder does not exist.")
-        return df_ops
+        return []
 
-    # Patterns to skip (handled by custom loaders)
     skip_patterns = set()
     for src in config.load_sources().get("stock_sources", []):
         skip_patterns.add(src.get("file_pattern", ""))
@@ -110,11 +102,151 @@ def process_new_transactions(df_ops: pd.DataFrame) -> pd.DataFrame:
                 return True
         return False
 
-    csv_files = [
+    return [
         f for f in os.listdir(input_dir)
         if f.lower().endswith('.csv') and not _should_skip(f)
     ]
 
+
+def _parse_degiro_file(filepath: str) -> pd.DataFrame | None:
+    """Read a single Degiro-format CSV and return a normalised DataFrame with
+    columns [Date, Product, ISIN, Quantity, Price, Coin, Value, eur].
+    Returns None when the column layout is not recognised."""
+    log = config.get_logger()
+    fname = os.path.basename(filepath)
+    df_new = pd.read_csv(filepath)
+
+    # Column mapping (Degiro quirks) ─────────────────────────────
+    rename_dict: dict[str, str] = {}
+    if 'Value EUR' in df_new.columns:
+        rename_dict['Value EUR'] = 'Value'
+    elif 'Local value' in df_new.columns and 'Value' not in df_new.columns:
+        rename_dict['Local value'] = 'Value'
+    if rename_dict:
+        df_new.rename(columns=rename_dict, inplace=True)
+
+    # Sort by datetime when Time column exists
+    if 'Date' in df_new.columns and 'Time' in df_new.columns:
+        df_new['_dt'] = pd.to_datetime(
+            df_new['Date'].astype(str) + ' ' + df_new['Time'].astype(str),
+            dayfirst=True, errors='coerce',
+        )
+        df_new = df_new.sort_values('_dt').drop(columns=['_dt'])
+
+    if 'eur' not in df_new.columns:
+        df_new['eur'] = 'EUR'
+
+    want = ['Date', 'Product', 'ISIN', 'Quantity', 'Price', 'Coin', 'Value', 'eur']
+    required = {'Date', 'Product', 'ISIN', 'Quantity', 'Price', 'Value'}
+
+    if not required.issubset(df_new.columns):
+        # Try positional mapping for raw Degiro 17-column format
+        if len(df_new.columns) >= 17:
+            raw = pd.DataFrame()
+            raw['Date']     = df_new.iloc[:, 0]
+            raw['Product']  = df_new.iloc[:, 2]
+            raw['ISIN']     = df_new.iloc[:, 3]
+            raw['Quantity'] = df_new.iloc[:, 6]
+            raw['Price']    = df_new.iloc[:, 7]
+            raw['Coin']     = df_new.iloc[:, 8]
+            raw['Value']    = df_new.iloc[:, 11]
+            raw['eur']      = 'EUR'
+            df_new = raw
+        else:
+            msg = f"Saltado {fname}: columnas no reconocidas {df_new.columns.tolist()}"
+            print(f"  ⚠️ Skipping {fname}: column mismatch {df_new.columns.tolist()}")
+            log.warning(msg)
+            return None
+
+    for c in want:
+        if c not in df_new.columns:
+            df_new[c] = None
+
+    df_f = df_new[want].copy()
+    df_f['Date'] = pd.to_datetime(df_f['Date'], dayfirst=True, errors='coerce')
+    for col in ['Price', 'Value']:
+        df_f[col] = (
+            df_f[col].astype(str)
+            .str.replace('"', '', regex=False)
+            .str.replace(',', '.', regex=False)
+            .astype(float)
+        )
+    df_f['Quantity'] = pd.to_numeric(df_f['Quantity'], errors='coerce')
+    return df_f
+
+
+def _split_new_vs_dup(df_f: pd.DataFrame, df_ops: pd.DataFrame) -> tuple[list[pd.Series], int]:
+    """Split parsed rows into (new_rows, duplicate_count) vs existing df_ops."""
+    df_ops['Date']     = pd.to_datetime(df_ops['Date'], errors='coerce')
+    df_ops['Quantity'] = pd.to_numeric(df_ops['Quantity'], errors='coerce')
+    df_ops['Price']    = pd.to_numeric(df_ops['Price'], errors='coerce')
+
+    new_rows: list[pd.Series] = []
+    for _, row in df_f.iterrows():
+        match = df_ops[
+            (df_ops['Date'] == row['Date'])
+            & (df_ops['ISIN'] == row['ISIN'])
+            & (df_ops['Quantity'] == row['Quantity'])
+            & (df_ops['Price'] == row['Price'])
+        ]
+        if match.empty:
+            new_rows.append(row)
+    return new_rows, len(df_f) - len(new_rows)
+
+
+def preview_new_transactions(df_ops: pd.DataFrame) -> list[dict]:
+    """Detect new Degiro transactions in input/ WITHOUT mutating anything
+    (no file deletion, no save). Returns one dict per pending file with the
+    rows that WOULD be added, for a confirmation preview."""
+    result: list[dict] = []
+    for fname in _pending_transaction_files():
+        filepath = os.path.join(config.INPUT_DIR, fname)
+        try:
+            df_f = _parse_degiro_file(filepath)
+            if df_f is None:
+                result.append({
+                    "file": fname, "kind": "stock", "error":
+                    "Formato de columnas no reconocido.", "entries": [],
+                })
+                continue
+            new_rows, n_dup = _split_new_vs_dup(df_f, df_ops.copy())
+            entries = [
+                {
+                    "date": (r['Date'].strftime('%Y-%m-%d')
+                             if pd.notna(r['Date']) else str(r['Date'])),
+                    "product": None if pd.isna(r['Product']) else str(r['Product']),
+                    "isin": None if pd.isna(r['ISIN']) else str(r['ISIN']),
+                    "quantity": None if pd.isna(r['Quantity']) else round(float(r['Quantity']), 6),
+                    "price": None if pd.isna(r['Price']) else round(float(r['Price']), 5),
+                    "coin": None if pd.isna(r.get('Coin')) else str(r['Coin']),
+                    "value": None if pd.isna(r['Value']) else round(float(r['Value']), 2),
+                }
+                for r in new_rows
+            ]
+            result.append({
+                "file": fname, "kind": "stock",
+                "rows_read": len(df_f), "new": len(new_rows), "duplicates": n_dup,
+                "entries": entries,
+            })
+        except Exception as e:
+            result.append({"file": fname, "kind": "stock", "error": str(e), "entries": []})
+    return result
+
+
+def process_new_transactions(df_ops: pd.DataFrame) -> pd.DataFrame:
+    """
+    Scan input/ for new Degiro-format CSV files, deduplicate against
+    existing df_ops, concatenate, sort and return the updated DF.
+    Processed files are deleted from input/.
+
+    Files matching any custom stock-source pattern or any crypto-source
+    pattern in sources.json are skipped here (they have their own loader).
+    """
+    if not os.path.exists(config.INPUT_DIR):
+        print("ℹ️  input/ folder does not exist.")
+        return df_ops
+
+    csv_files = _pending_transaction_files()
     if not csv_files:
         print("ℹ️  No new transaction files in input/.")
         return df_ops
@@ -124,93 +256,21 @@ def process_new_transactions(df_ops: pd.DataFrame) -> pd.DataFrame:
     new_rows: list[pd.Series] = []
 
     for fname in csv_files:
-        filepath = os.path.join(input_dir, fname)
+        filepath = os.path.join(config.INPUT_DIR, fname)
         try:
-            df_new = pd.read_csv(filepath)
+            df_f = _parse_degiro_file(filepath)
+            if df_f is None:
+                continue
 
-            # Column mapping (Degiro quirks) ─────────────────────────────
-            rename_dict: dict[str, str] = {}
-            if 'Value EUR' in df_new.columns:
-                rename_dict['Value EUR'] = 'Value'
-            elif 'Local value' in df_new.columns and 'Value' not in df_new.columns:
-                rename_dict['Local value'] = 'Value'
-            if rename_dict:
-                df_new.rename(columns=rename_dict, inplace=True)
-
-            # Sort by datetime when Time column exists
-            if 'Date' in df_new.columns and 'Time' in df_new.columns:
-                df_new['_dt'] = pd.to_datetime(
-                    df_new['Date'].astype(str) + ' ' + df_new['Time'].astype(str),
-                    dayfirst=True, errors='coerce',
-                )
-                df_new = df_new.sort_values('_dt').drop(columns=['_dt'])
-
-            if 'eur' not in df_new.columns:
-                df_new['eur'] = 'EUR'
-
-            want = ['Date', 'Product', 'ISIN', 'Quantity', 'Price', 'Coin', 'Value', 'eur']
-            required = {'Date', 'Product', 'ISIN', 'Quantity', 'Price', 'Value'}
-
-            if not required.issubset(df_new.columns):
-                # Try positional mapping for raw Degiro 17-column format
-                if len(df_new.columns) >= 17:
-                    raw = pd.DataFrame()
-                    raw['Date']     = df_new.iloc[:, 0]
-                    raw['Product']  = df_new.iloc[:, 2]
-                    raw['ISIN']     = df_new.iloc[:, 3]
-                    raw['Quantity'] = df_new.iloc[:, 6]
-                    raw['Price']    = df_new.iloc[:, 7]
-                    raw['Coin']     = df_new.iloc[:, 8]
-                    raw['Value']    = df_new.iloc[:, 11]
-                    raw['eur']      = 'EUR'
-                    df_new = raw
-                else:
-                    msg = f"Saltado {fname}: columnas no reconocidas {df_new.columns.tolist()}"
-                    print(f"  ⚠️ Skipping {fname}: column mismatch {df_new.columns.tolist()}")
-                    log.warning(msg)
-                    continue
-
-            for c in want:
-                if c not in df_new.columns:
-                    df_new[c] = None
-
-            df_f = df_new[want].copy()
-            df_f['Date'] = pd.to_datetime(df_f['Date'], dayfirst=True, errors='coerce')
-            for col in ['Price', 'Value']:
-                df_f[col] = (
-                    df_f[col].astype(str)
-                    .str.replace('"', '', regex=False)
-                    .str.replace(',', '.', regex=False)
-                    .astype(float)
-                )
-            df_f['Quantity'] = pd.to_numeric(df_f['Quantity'], errors='coerce')
-
-            # Normalise ops types for dedup comparison
-            df_ops['Date']     = pd.to_datetime(df_ops['Date'], errors='coerce')
-            df_ops['Quantity'] = pd.to_numeric(df_ops['Quantity'], errors='coerce')
-            df_ops['Price']    = pd.to_numeric(df_ops['Price'], errors='coerce')
-
-            rows_in_file = len(df_f)
-            file_new_rows: list[pd.Series] = []
-            for _, row in df_f.iterrows():
-                match = df_ops[
-                    (df_ops['Date'] == row['Date'])
-                    & (df_ops['ISIN'] == row['ISIN'])
-                    & (df_ops['Quantity'] == row['Quantity'])
-                    & (df_ops['Price'] == row['Price'])
-                ]
-                if match.empty:
-                    file_new_rows.append(row)
-
+            file_new_rows, n_dup = _split_new_vs_dup(df_f, df_ops)
             n_added = len(file_new_rows)
-            n_dup   = rows_in_file - n_added
             new_rows.extend(file_new_rows)
 
             os.remove(filepath)
             print(f"  ✅ Processed & deleted: {fname}")
             log.info(
                 f"process_new_transactions: archivo={fname} "
-                f"filas_leídas={rows_in_file} nuevas={n_added} duplicadas={n_dup}"
+                f"filas_leídas={len(df_f)} nuevas={n_added} duplicadas={n_dup}"
             )
 
         except Exception as e:
@@ -450,6 +510,60 @@ def _parse_crypto_rows(df_raw: pd.DataFrame, src: dict) -> list[dict]:
         })
 
     return out
+
+
+def preview_new_crypto_transactions() -> list[dict]:
+    """Detect new crypto transactions in input/ WITHOUT saving or deleting.
+    Only pending files in input/ are reported (processing/ files are permanent
+    sources, not part of the confirm-before-save flow)."""
+    sources = config.get_crypto_sources()
+    result: list[dict] = []
+    if not sources or not os.path.exists(config.INPUT_DIR):
+        return result
+
+    df_current = load_crypto_operations()
+    existing = set()
+    if len(df_current) > 0:
+        existing = set(
+            df_current['Date'].astype(str) + '_'
+            + df_current['Coin'].astype(str) + '_'
+            + df_current['Quantity'].astype(str)
+        )
+
+    for src in sources:
+        pattern = src.get("file_pattern", "")
+        name    = src.get("name", pattern)
+        matched = [
+            f for f in os.listdir(config.INPUT_DIR)
+            if fnmatch.fnmatch(f.lower(), pattern.lower())
+        ]
+        for fname in matched:
+            filepath = os.path.join(config.INPUT_DIR, fname)
+            try:
+                df_raw = pd.read_csv(filepath)
+                file_rows = _parse_crypto_rows(df_raw, src)
+                entries, n_dup = [], 0
+                for r in file_rows:
+                    key = f"{r['Date']}_{r['Coin']}_{r['Quantity']}"
+                    if key in existing:
+                        n_dup += 1
+                        continue
+                    entries.append({
+                        "date": (r['Date'].strftime('%Y-%m-%d')
+                                 if pd.notna(r['Date']) else str(r['Date'])),
+                        "coin": str(r['Coin']),
+                        "quantity": round(float(r['Quantity']), 8),
+                        "ticker": str(r['ticker']),
+                    })
+                result.append({
+                    "file": fname, "kind": "crypto", "source": name,
+                    "rows_read": len(file_rows), "new": len(entries), "duplicates": n_dup,
+                    "entries": entries,
+                })
+            except Exception as e:
+                result.append({"file": fname, "kind": "crypto", "source": name,
+                               "error": str(e), "entries": []})
+    return result
 
 
 def process_crypto_transactions() -> pd.DataFrame:

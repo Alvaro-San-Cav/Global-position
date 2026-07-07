@@ -4,7 +4,7 @@ import {
   useQueryClient,
   type UseQueryOptions,
 } from '@tanstack/react-query'
-import { apiGet, apiPost, apiDelete, apiUpload } from './client'
+import { apiGet, apiPost, apiPut, apiDelete, apiUpload } from './client'
 import type {
   AssetClassesResponse,
   CashResponse,
@@ -13,11 +13,16 @@ import type {
   DashboardResponse,
   Operation,
   OperationCreate,
+  ProcessCommit,
+  ProcessPreview,
   ProcessResult,
+  RebalanceResponse,
   ReportResult,
   SourceData,
+  SourceFileContent,
   SourceFileInfo,
   SourcesConfig,
+  TargetConfig,
   TaxResponse,
 } from './types'
 
@@ -32,6 +37,8 @@ export const qk = {
   pending: ['pending-files'] as const,
   sourceFiles: ['source-files'] as const,
   sourceData: ['source-data'] as const,
+  target: ['target'] as const,
+  rebalance: ['rebalance'] as const,
 }
 
 // ── Queries ────────────────────────────────────────────────────────────
@@ -123,6 +130,61 @@ export function useSourceData() {
   })
 }
 
+/** Raw CSV contents of a configured source file (enabled only when a name is set). */
+export function useSourceFile(filename: string | null) {
+  return useQuery<SourceFileContent>({
+    queryKey: ['source-file', filename],
+    queryFn: () =>
+      apiGet<SourceFileContent>(`/api/source-file/${encodeURIComponent(filename as string)}`),
+    enabled: filename !== null,
+    staleTime: 0,
+  })
+}
+
+export function useSaveSourceFile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: SourceFileContent) =>
+      apiPut<SourceFileContent>(
+        `/api/source-file/${encodeURIComponent(body.file)}`,
+        body,
+      ),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['source-file', data.file] })
+      qc.invalidateQueries({ queryKey: qk.sourceData })
+      qc.invalidateQueries({ queryKey: qk.dashboard })
+    },
+  })
+}
+
+// ── Cartera objetivo (target portfolio) ──────────────────────────────────
+
+export function useTarget() {
+  return useQuery<TargetConfig>({
+    queryKey: qk.target,
+    queryFn: () => apiGet<TargetConfig>('/api/target'),
+  })
+}
+
+export function useRebalance() {
+  return useQuery<RebalanceResponse>({
+    queryKey: qk.rebalance,
+    queryFn: () => apiGet<RebalanceResponse>('/api/rebalance'),
+    staleTime: 5 * 60 * 1000,
+  })
+}
+
+export function useSaveTarget() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: TargetConfig) => apiPost<TargetConfig>('/api/target', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.target })
+      qc.invalidateQueries({ queryKey: qk.rebalance })
+    },
+  })
+}
+
 // ── Mutations ──────────────────────────────────────────────────────────
 
 export function useAddOperation() {
@@ -184,12 +246,35 @@ export function useDeletePending() {
   })
 }
 
+/** Preview what /api/process would add — no save, no delete. */
+export function useProcessPreview() {
+  return useMutation({
+    mutationFn: () => apiPost<ProcessPreview>('/api/process/preview'),
+  })
+}
+
 export function useProcess() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => apiPost<ProcessResult>('/api/process'),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.pending })
+      qc.invalidateQueries({ queryKey: qk.operations })
+      qc.invalidateQueries({ queryKey: qk.crypto })
+      qc.invalidateQueries({ queryKey: qk.dashboard })
+    },
+  })
+}
+
+/** Persist the (edited) preview rows the user confirmed. */
+export function useProcessCommit() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ProcessCommit) =>
+      apiPost<ProcessResult>('/api/process/commit', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.pending })
+      qc.invalidateQueries({ queryKey: qk.sourceData })
       qc.invalidateQueries({ queryKey: qk.operations })
       qc.invalidateQueries({ queryKey: qk.crypto })
       qc.invalidateQueries({ queryKey: qk.dashboard })

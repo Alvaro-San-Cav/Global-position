@@ -89,6 +89,32 @@ def get_asset_classes() -> dict[str, str]:
     return out
 
 
+def get_target_portfolio() -> dict:
+    """Return the target/model-portfolio config from sources.json.
+
+    Shape (all keys optional; empty dict means "not configured yet"):
+        {
+          "targets": {"Acciones": 40, "ETF": 30, "Bonos": 20, "Cripto": 5},
+          "band_pct": 5,
+          "max_asset_pct": 10,
+          "class_limits": {"Cripto": {"min": 0, "max": 10}},
+          "cash_buffer": {"pct": 5, "amount": 0}
+        }
+    """
+    raw = load_sources().get("target_portfolio", {})
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def save_target_portfolio(cfg: dict) -> None:
+    """Persist the target_portfolio section, preserving the rest of sources.json."""
+    data = load_sources()
+    data["target_portfolio"] = cfg
+    with open(SOURCES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
 def get_zero_value_flow_from_est_tickers() -> list[str]:
     """
     Return tickers that should estimate invested flow when Value==0.
