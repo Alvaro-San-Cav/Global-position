@@ -1,3 +1,5 @@
+import { addMonths, subMonths } from 'date-fns'
+
 /**
  * Hitos patrimoniales de 0 a 1 M€ y proyección simple al siguiente hito.
  * Las etapas y descripciones son orientativas (texto propio), no asesoramiento.
@@ -121,4 +123,73 @@ export function fmtDuration(months: number | null): string {
   if (y > 0) parts.push(`${y} ${y === 1 ? 'año' : 'años'}`)
   if (m > 0) parts.push(`${m} ${m === 1 ? 'mes' : 'meses'}`)
   return parts.join(' y ')
+}
+
+export interface SeriesPoint {
+  x: string
+  y: number
+}
+
+/**
+ * Aportación mensual media a partir de la serie de capital aportado.
+ * `windowMonths` = ventana reciente (p. ej. 12); null = todo el histórico.
+ * Si el histórico es más corto que la ventana se usa todo lo disponible.
+ * Devuelve null si hay menos de ~1 mes de datos. Puede ser negativa (retiradas netas).
+ */
+export function avgMonthlyContribution(
+  invested: SeriesPoint[] | null | undefined,
+  windowMonths: number | null,
+): number | null {
+  const pts = (invested ?? [])
+    .filter((p) => Number.isFinite(p.y) && !Number.isNaN(Date.parse(p.x)))
+    .sort((a, b) => Date.parse(a.x) - Date.parse(b.x))
+  if (pts.length < 2) return null
+  const last = pts[pts.length - 1]
+  let start = pts[0]
+  if (windowMonths !== null) {
+    const cutoff = subMonths(new Date(last.x), windowMonths).getTime()
+    const inside = pts.filter((p) => Date.parse(p.x) <= cutoff)
+    if (inside.length) start = inside[inside.length - 1]
+  }
+  const months = (Date.parse(last.x) - Date.parse(start.x)) / (1000 * 60 * 60 * 24 * 30.4375)
+  if (months < 1) return null
+  return (last.y - start.y) / months
+}
+
+export interface ProjectionPoint {
+  /** Fecha ISO (yyyy-MM-dd). */
+  x: string
+  /** Patrimonio proyectado. */
+  proj: number
+  /** Capital aportado proyectado (base + aportaciones futuras). */
+  contrib: number
+}
+
+/**
+ * Curva mensual de patrimonio proyectado desde `current` con aportación y
+ * rentabilidad constantes. Corta al superar `target` o a los `maxYears`.
+ * El primer punto es el estado actual (mes 0).
+ */
+export function projectionCurve(
+  current: number,
+  invested: number,
+  monthly: number,
+  annualReturnPct: number,
+  from: Date,
+  target = 1_000_000,
+  maxYears = 40,
+): ProjectionPoint[] {
+  if (![current, invested, monthly, annualReturnPct].every(Number.isFinite)) return []
+  const rate = Math.pow(1 + annualReturnPct / 100, 1 / 12) - 1
+  const iso = (m: number) => addMonths(from, m).toISOString().slice(0, 10)
+  const out: ProjectionPoint[] = [{ x: iso(0), proj: current, contrib: invested }]
+  let v = current
+  let c = invested
+  for (let m = 1; m <= maxYears * 12; m++) {
+    v = v * (1 + rate) + monthly
+    c += monthly
+    out.push({ x: iso(m), proj: v, contrib: c })
+    if (v >= target) break
+  }
+  return out
 }

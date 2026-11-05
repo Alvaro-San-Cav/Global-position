@@ -6,17 +6,38 @@ import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useCash, useDashboard } from '@/api/queries'
 import { fmtEur, fmtPct, parseAmount, parsePercent } from '@/lib/format'
-import { MILESTONES, computeStage, fmtDuration, monthsToTarget } from '@/lib/milestones'
+import {
+  MILESTONES,
+  avgMonthlyContribution,
+  computeStage,
+  fmtDuration,
+  monthsToTarget,
+  projectionCurve,
+} from '@/lib/milestones'
+import { MilestonesChart } from '@/components/charts/MilestonesChart'
 import { cn } from '@/lib/utils'
+
+function shortLabel(v: number): string {
+  return v >= 1_000_000 ? `${v / 1_000_000} M` : `${v / 1000}k`
+}
 
 const STORAGE_KEY = 'gp.milestones.assumptions'
 
+type Mode = 'hist12' | 'histAll' | 'manual'
+
 interface Assumptions {
+  mode: Mode
   monthly: string
   returnPct: string
 }
 
-const DEFAULTS: Assumptions = { monthly: '500', returnPct: '7' }
+const DEFAULTS: Assumptions = { mode: 'hist12', monthly: '500', returnPct: '7' }
+
+const MODES: { key: Mode; label: string }[] = [
+  { key: 'hist12', label: 'Mi ritmo (últimos 12 meses)' },
+  { key: 'histAll', label: 'Mi ritmo (todo el histórico)' },
+  { key: 'manual', label: 'Manual' },
+]
 
 function loadAssumptions(): Assumptions {
   try {
@@ -24,6 +45,7 @@ function loadAssumptions(): Assumptions {
     if (!raw) return DEFAULTS
     const p = JSON.parse(raw) as Partial<Assumptions>
     return {
+      mode: p.mode === 'hist12' || p.mode === 'histAll' || p.mode === 'manual' ? p.mode : DEFAULTS.mode,
       monthly: typeof p.monthly === 'string' ? p.monthly : DEFAULTS.monthly,
       returnPct: typeof p.returnPct === 'string' ? p.returnPct : DEFAULTS.returnPct,
     }
@@ -62,8 +84,19 @@ export function Milestones() {
   const netWorth = (data?.portfolio_total_value ?? 0) + cashTotal
   const hasData = !!data && !data.error && !!data.metrics
 
-  const monthly = parseAmount(as.monthly)
-  const returnPct = parsePercent(as.returnPct)
+  // Ritmo histórico: aportación media del capital aportado + rentabilidad anualizada (TWR).
+  const histMonthly = useMemo(
+    () =>
+      as.mode === 'manual'
+        ? null
+        : avgMonthlyContribution(data?.portfolio_chart?.invested, as.mode === 'hist12' ? 12 : null),
+    [as.mode, data?.portfolio_chart?.invested],
+  )
+  const histReturn = data?.metrics?.twr_total_anual ?? data?.metrics?.cagr_total ?? null
+  const useHistory = as.mode !== 'manual' && histMonthly !== null && histReturn !== null
+
+  const monthly = useHistory ? Math.max(0, histMonthly) : parseAmount(as.monthly)
+  const returnPct = useHistory ? histReturn : parsePercent(as.returnPct)
   const assumptionsOk = Number.isFinite(monthly) && monthly >= 0 && Number.isFinite(returnPct) && returnPct > -50
 
   const stage = useMemo(() => computeStage(netWorth), [netWorth])
@@ -74,6 +107,16 @@ export function Milestones() {
         assumptionsOk ? monthsToTarget(netWorth, monthly, returnPct, m.value) : null,
       ),
     [netWorth, monthly, returnPct, assumptionsOk],
+  )
+
+  const investedSeries = data?.portfolio_chart?.invested
+  const lastInvested = investedSeries?.length ? investedSeries[investedSeries.length - 1].y : netWorth
+  const curve = useMemo(
+    () =>
+      assumptionsOk && netWorth < 1_000_000
+        ? projectionCurve(netWorth, lastInvested + cashTotal, monthly, returnPct, new Date())
+        : [],
+    [assumptionsOk, netWorth, lastInvested, cashTotal, monthly, returnPct],
   )
 
   return (
@@ -116,17 +159,26 @@ export function Milestones() {
               {stage.next ? (
                 <div>
                   <div className="mb-1 flex justify-between text-xs text-txt2">
-                    <span>{stage.reached ? stage.reached.label : '0 €'}</span>
-                    <span>
-                      {fmtPct(stage.pctToNext, 1)} hacia {stage.next.label}
-                    </span>
+                    <span>{fmtPct(stage.pctToNext, 0)} del tramo actual</span>
+                    <span>Siguiente: {stage.next.label}</span>
                   </div>
-                  <progress
-                    className="h-2.5 w-full appearance-none overflow-hidden rounded-full [&::-moz-progress-bar]:bg-accent [&::-webkit-progress-bar]:bg-card3 [&::-webkit-progress-value]:bg-accent"
-                    aria-label={`Progreso hacia ${stage.next.label}`}
-                    max={100}
-                    value={Math.min(100, Math.max(0, stage.pctToNext))}
-                  />
+                  <span className="sr-only">
+                    {`Patrimonio ${fmtEur(netWorth, 0)} de 1.000.000 €. Siguiente hito: ${stage.next.label}`}
+                  </span>
+                  <div aria-hidden className="flex gap-1">
+                    {MILESTONES.map((m, i) => {
+                      const from = i === 0 ? 0 : MILESTONES[i - 1].value
+                      const fill = Math.min(100, Math.max(0, ((netWorth - from) / (m.value - from)) * 100))
+                      return (
+                        <div key={m.value} className="min-w-0 flex-1">
+                          <div className="h-2.5 overflow-hidden rounded-full bg-card3">
+                            <div className="h-full rounded-full bg-accent" style={{ width: `${fill}%` }} />
+                          </div>
+                          <div className="mt-1 text-center text-[10px] text-txt3">{shortLabel(m.value)}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
                   <div className="mt-1 text-xs text-txt2">
                     Te faltan <span className="font-medium text-txt">{fmtEur(stage.remaining, 0)}</span>
                   </div>
@@ -145,32 +197,98 @@ export function Milestones() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Supuestos de la proyección</CardTitle>
+              <CardTitle>Ritmo para la proyección</CardTitle>
             </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Field label="Aportación mensual (€)">
-                  <Input
-                    inputMode="decimal"
-                    value={as.monthly}
-                    onChange={(e) => setAs((a) => ({ ...a, monthly: e.target.value }))}
-                  />
-                </Field>
-                <Field label="Rentabilidad anual esperada (%)" hint="Supuesto, no garantizado. Antes de impuestos e inflación.">
-                  <Input
-                    inputMode="decimal"
-                    value={as.returnPct}
-                    onChange={(e) => setAs((a) => ({ ...a, returnPct: e.target.value }))}
-                  />
-                </Field>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {MODES.map((m) => (
+                  <button
+                    key={m.key}
+                    type="button"
+                    aria-pressed={as.mode === m.key}
+                    onClick={() => setAs((a) => ({ ...a, mode: m.key }))}
+                    className={cn(
+                      'rounded-[var(--radius-card)] border px-3 py-1.5 text-xs font-medium transition-colors',
+                      as.mode === m.key
+                        ? 'border-accent bg-accent/15 text-txt'
+                        : 'border-border-subtle text-txt2 hover:text-txt',
+                    )}
+                  >
+                    {m.label}
+                  </button>
+                ))}
               </div>
-              {!assumptionsOk && (
-                <p role="alert" className="mt-2 text-xs text-amber">
+
+              {as.mode !== 'manual' && !useHistory && (
+                <p role="alert" className="text-xs text-amber">
+                  No hay histórico suficiente para estimar tu ritmo (mín. ~1 mes de aportaciones y
+                  rentabilidad). Usa el modo manual.
+                </p>
+              )}
+
+              {useHistory ? (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="rounded-[var(--radius-card)] bg-card2 p-3">
+                    <div className="text-xs text-txt2">Aportación media</div>
+                    <div className="text-lg font-semibold text-txt">{fmtEur(monthly, 0)}/mes</div>
+                    {(histMonthly as number) < 0 && (
+                      <div className="text-xs text-amber">Retiradas netas: se proyecta con 0 €.</div>
+                    )}
+                  </div>
+                  <div className="rounded-[var(--radius-card)] bg-card2 p-3">
+                    <div className="text-xs text-txt2">Rentabilidad anualizada (TWR)</div>
+                    <div className="text-lg font-semibold text-txt">{fmtPct(returnPct)}</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field label="Aportación mensual (€)">
+                    <Input
+                      inputMode="decimal"
+                      value={as.monthly}
+                      onChange={(e) => setAs((a) => ({ ...a, monthly: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Rentabilidad anual esperada (%)">
+                    <Input
+                      inputMode="decimal"
+                      value={as.returnPct}
+                      onChange={(e) => setAs((a) => ({ ...a, returnPct: e.target.value }))}
+                    />
+                  </Field>
+                </div>
+              )}
+
+              <p className="text-xs text-txt3">
+                La rentabilidad pasada no garantiza la futura. La aportación sale de la variación del
+                capital aportado en el gráfico de la cartera; la rentabilidad, del TWR anualizado.
+              </p>
+              {as.mode === 'manual' && !assumptionsOk && (
+                <p role="alert" className="text-xs text-amber">
                   Introduce una aportación (≥ 0) y una rentabilidad válidas para ver los plazos.
                 </p>
               )}
             </CardContent>
           </Card>
+
+          {curve.length > 1 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Camino hacia 1 M€</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <MilestonesChart
+                  history={data?.portfolio_chart?.value}
+                  cashOffset={cashTotal}
+                  projection={curve}
+                />
+                <p className="mt-2 text-xs text-txt3">
+                  Parte de tu patrimonio actual y suma tu aportación mensual con la rentabilidad
+                  elegida. El histórico (últimos 24 meses) incluye el efectivo actual como constante.
+                </p>
+              </CardContent>
+            </Card>
+          )}
 
           <Card>
             <CardHeader>

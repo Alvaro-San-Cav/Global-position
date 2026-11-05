@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { computeStage, fmtDuration, monthsToTarget } from './milestones'
+import {
+  avgMonthlyContribution,
+  computeStage,
+  fmtDuration,
+  monthsToTarget,
+  projectionCurve,
+} from './milestones'
 
 describe('computeStage', () => {
   it('sin patrimonio: sin hito alcanzado, siguiente 1.000', () => {
@@ -69,5 +75,71 @@ describe('fmtDuration', () => {
     expect(fmtDuration(12)).toBe('1 año')
     expect(fmtDuration(27)).toBe('2 años y 3 meses')
     expect(fmtDuration(null)).toBe('más de 80 años')
+  })
+})
+
+describe('projectionCurve', () => {
+  const from = new Date(Date.UTC(2026, 0, 1))
+
+  it('empieza en el estado actual y es lineal sin rentabilidad', () => {
+    const c = projectionCurve(1000, 800, 100, 0, from, 1500)
+    expect(c[0]).toMatchObject({ proj: 1000, contrib: 800 })
+    expect(c[c.length - 1].proj).toBe(1500)
+    expect(c.length).toBe(6)
+    expect(c[5].contrib).toBe(1300)
+  })
+
+  it('coincide con monthsToTarget', () => {
+    const c = projectionCurve(10_000, 8_000, 500, 7, from, 100_000)
+    expect(c.length - 1).toBe(monthsToTarget(10_000, 500, 7, 100_000))
+  })
+
+  it('entradas no finitas -> vacío', () => {
+    expect(projectionCurve(NaN, 0, 1, 1, from)).toEqual([])
+  })
+
+  it('sin crecimiento corta en el máximo de años', () => {
+    expect(projectionCurve(1000, 1000, 0, 0, from, 1_000_000, 2).length).toBe(25)
+  })
+})
+
+describe('avgMonthlyContribution', () => {
+  // 100 €/mes durante 24 meses (puntos mensuales ~ 30,4375 días)
+  const series = Array.from({ length: 25 }, (_, i) => ({
+    x: new Date(Date.UTC(2024, 0, 1) + i * 30.4375 * 86400000).toISOString().slice(0, 10),
+    y: i * 100,
+  }))
+
+  it('histórico completo', () => {
+    expect(avgMonthlyContribution(series, null)).toBeCloseTo(100, 0)
+  })
+
+  it('ventana reciente de 12 meses', () => {
+    expect(avgMonthlyContribution(series, 12)).toBeCloseTo(100, 0)
+  })
+
+  it('la ventana capta un cambio de ritmo reciente', () => {
+    const fast = series.map((p, i) => ({ ...p, y: i <= 12 ? i * 100 : 1200 + (i - 12) * 300 }))
+    const recent = avgMonthlyContribution(fast, 12) as number
+    const total = avgMonthlyContribution(fast, null) as number
+    expect(recent).toBeGreaterThan(total)
+  })
+
+  it('ventana mayor que el histórico usa todo lo disponible', () => {
+    expect(avgMonthlyContribution(series, 60)).toBeCloseTo(100, 0)
+  })
+
+  it('pocos datos o entradas vacías -> null', () => {
+    expect(avgMonthlyContribution(null, 12)).toBeNull()
+    expect(avgMonthlyContribution([{ x: '2025-01-01', y: 1 }], 12)).toBeNull()
+    expect(
+      avgMonthlyContribution(
+        [
+          { x: '2025-01-01', y: 0 },
+          { x: '2025-01-10', y: 50 },
+        ],
+        null,
+      ),
+    ).toBeNull()
   })
 })
