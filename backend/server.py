@@ -6,10 +6,17 @@ Usage:
     uvicorn server:app --reload --port 8000
 """
 
+import fnmatch
 import json
+import logging
 import os
 import sys
+import tempfile
+import threading
+import time
 import traceback
+import re
+from datetime import datetime
 
 # Ensure UTF-8 output on Windows (avoids emoji UnicodeEncodeError in print statements)
 if hasattr(sys.stdout, "reconfigure"):
@@ -51,17 +58,36 @@ from src.api_models import (
     ProcessResult,
     ReportResult,
     SourceData,
+    SourcesPayload,
     SourceFileContent,
     SourceFileInfo,
     TaxResponse,
     UploadResponse,
 )
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Build the dashboard with fresh market data as soon as the server starts,
+    so the app opens with up-to-date values without pressing 'Actualizar'."""
+    def _warm():
+        try:
+            _get_dashboard(refresh=True)
+            print("[+] Dashboard warm-up completed.")
+        except Exception as e:
+            print(f"[-] Dashboard warm-up failed: {e}")
+    threading.Thread(target=_warm, daemon=True, name="dashboard-warmup").start()
+    yield
+
+
 app = FastAPI(
     title="Global Position",
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
     redoc_url=None,
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -71,11 +97,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Frontend build output (served in production). During Stage 2 the legacy
-# web/ folder at the repo root is still used; Stage 9 switches to frontend/dist.
+# Frontend build output (served in production): frontend/dist. If it has not
+# been built yet, fall back to the legacy web/ folder at the repo root.
 WEB_DIR = os.path.join(config.BASE_DIR, "frontend", "dist")
 if not os.path.isdir(WEB_DIR):
     WEB_DIR = os.path.join(config.BASE_DIR, "web")
+
+# ─────────────────────────────────────────────────────────────────────────
+#  Errors: log the detail, never leak internal paths/exceptions to the client
+# ─────────────────────────────────────────────────────────────────────────
+
+_log = logging.getLogger("globalpos.server")
+GENERIC_ERROR = "Error interno del servidor. Consulta processing/ingesta.log para más detalle."
+
+
+def _log_exception(e: BaseException, ctx: str = "") -> None:
+    _log.exception("Unhandled error %s: %s", ctx, e)
+    try:
+        config.get_logger().error(f"server error {ctx}: {type(e).__name__}: {e}")
+    except Exception:
+        pass
+
+
+def _internal_error(e: BaseException, ctx: str = "") -> HTTPException:
+    """Log `e` and return a generic 500 (use as `raise _internal_error(e)`)."""
+    _log_exception(e, ctx)
+    return HTTPException(500, GENERIC_ERROR)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    _log_exception(exc, f"{request.method} {request.url.path}")
+    return JSONResponse({"detail": GENERIC_ERROR, "error": GENERIC_ERROR}, status_code=500)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 #  Helpers
@@ -179,9 +233,61 @@ def _resolve_tickers_silent(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────
 
 _dashboard_cache: dict = {}
+_dashboard_cache_day: str = ""       # YYYY-MM-DD of the build; stale on day change
+_dashboard_lock = threading.Lock()   # single builder; GETs wait for the result
+_cache_state_lock = threading.Lock() # guards cache dict/day/version (very short holds)
+_cache_version: int = 0              # bumped on every invalidation
 
 
-def _build_dashboard() -> dict:
+def _invalidate_dashboard() -> None:
+    """Drop the cached dashboard. Bumps the version so a build that started
+    BEFORE this call (with now-stale data) will not be stored when it ends."""
+    global _dashboard_cache, _dashboard_cache_day, _cache_version
+    with _cache_state_lock:
+        _cache_version += 1
+        _dashboard_cache = {}
+        _dashboard_cache_day = ""
+
+
+def _get_dashboard(refresh: bool = False) -> dict:
+    """Return the cached dashboard, rebuilding when empty, on explicit refresh,
+    or when the cache was built on a previous day (long-lived hidden server).
+
+    Results containing "error" are never cached. If a *refresh* build fails
+    (e.g. yfinance down) the previous cached dashboard is kept and returned."""
+    global _dashboard_cache, _dashboard_cache_day
+    today = pd.Timestamp.today().strftime("%Y-%m-%d")
+
+    def _snapshot():
+        with _cache_state_lock:
+            return _dashboard_cache, _dashboard_cache_day, _cache_version
+
+    cached, cday, _ = _snapshot()
+    if cached and not refresh and cday == today:
+        return cached
+    with _dashboard_lock:
+        # Re-check: another thread may have rebuilt while we waited.
+        cached, cday, version = _snapshot()
+        if cached and not refresh and cday == today:
+            return cached
+        try:
+            result = _build_dashboard(force_refresh=refresh)
+        except Exception:
+            if cached:
+                _log.exception("Dashboard rebuild failed; serving previous cache")
+                return cached
+            raise
+        if "error" in result:
+            # Don't cache errors; on refresh keep whatever good result we had.
+            return cached if (refresh and cached) else result
+        with _cache_state_lock:
+            if version == _cache_version:        # nothing invalidated meanwhile
+                _dashboard_cache = result
+                _dashboard_cache_day = today
+        return result
+
+
+def _build_dashboard(force_refresh: bool = False) -> dict:
     df_ops = loaders.load_operations()
     if df_ops.empty:
         return {"error": "No hay operaciones en processing/operaciones.csv"}
@@ -203,9 +309,16 @@ def _build_dashboard() -> dict:
     crypto_coins = df_crypto["Coin"].dropna().unique().tolist() if has_crypto else []
 
     start_date = df_merged["Date"].min()
-    prices   = market_data.fetch_prices(tickers, start_date)
+    if has_crypto:
+        # Crypto bought before the first stock still needs FX/benchmark history.
+        crypto_min = pd.to_datetime(df_crypto["Date"], errors="coerce").min()
+        if pd.notna(crypto_min) and (pd.isna(start_date) or crypto_min < start_date):
+            start_date = crypto_min
+    prices   = market_data.fetch_prices(tickers, start_date,
+                                        force_refresh=force_refresh)
     fx_rates = market_data.fetch_fx_rates(currencies, start_date,
-                                          crypto_coins=crypto_coins or None)
+                                          crypto_coins=crypto_coins or None,
+                                          force_refresh=force_refresh)
 
     # Exclude failed tickers
     failed_tickers = [t for t in tickers if t not in prices.columns] if not prices.empty else tickers
@@ -283,15 +396,23 @@ def _build_dashboard() -> dict:
     class_overrides = config.get_asset_classes()
     class_totals: dict[str, float] = {}
     class_members: dict[str, list[dict]] = {}
+    crypto_symbols = (
+        {str(c) for c in vc_eur.columns} if (has_crypto and vc_eur is not None) else set()
+    ) | {str(c) for c in crypto_coins}
     for sym, val in vpa.items():
-        cls = core.classify_asset(str(sym), _asset_display_name(str(sym)), class_overrides)
+        if str(sym) in crypto_symbols:
+            # Held crypto is always "Cripto" (an explicit user override still wins).
+            cls = class_overrides.get(str(sym).strip().upper()) or "Cripto"
+        else:
+            cls = core.classify_asset(str(sym), _asset_display_name(str(sym)), class_overrides)
         class_totals[cls] = class_totals.get(cls, 0.0) + float(val)
         class_members.setdefault(cls, []).append(
             {"name": _asset_display_name(str(sym)), "symbol": str(sym), "value": round(float(val), 2)}
         )
 
     # Cash → "Efectivo" class (converted to EUR, kept OUT of P&L metrics).
-    cash_eur_by_cur = cash_store.cash_to_eur(cash_balances, fx_rates)
+    cash_missing_fx: list[str] = []
+    cash_eur_by_cur = cash_store.cash_to_eur(cash_balances, fx_rates, missing=cash_missing_fx)
     cash_total = round(sum(cash_eur_by_cur.values()), 2)
     if cash_total > 0:
         class_totals["Efectivo"] = class_totals.get("Efectivo", 0.0) + cash_total
@@ -398,6 +519,7 @@ def _build_dashboard() -> dict:
                         correlation["top_positive"] = sorted(pairs, key=lambda x: x["corr"], reverse=True)[:5]
                         correlation["top_negative"] = sorted(pairs, key=lambda x: x["corr"])[:5]
     except Exception as corr_e:
+        _log_exception(corr_e, "correlation")
         correlation = {
             "threshold_pct": 1.5,
             "assets": [],
@@ -405,7 +527,7 @@ def _build_dashboard() -> dict:
             "top_positive": [],
             "top_negative": [],
             "history_days": 0,
-            "note": f"No se pudo calcular correlaciones: {corr_e}",
+            "note": "No se pudo calcular correlaciones (ver log del servidor).",
         }
 
     # Crypto chart
@@ -464,6 +586,7 @@ def _build_dashboard() -> dict:
         "crypto_breakdown": crypto_breakdown,
         "crypto_total_value": round(crypto_total_value, 2),
         "failed_tickers": failed_tickers,
+        "cash_missing_fx": sorted(set(cash_missing_fx)),
     }
 
 
@@ -478,14 +601,11 @@ def api_health():
 
 @app.get("/api/dashboard", response_model=DashboardResponse)
 def api_dashboard(refresh: bool = False):
-    global _dashboard_cache
-    if not _dashboard_cache or refresh:
-        try:
-            _dashboard_cache = _build_dashboard()
-        except Exception as e:
-            traceback.print_exc()
-            return JSONResponse({"error": str(e)}, status_code=500)
-    return _dashboard_cache
+    try:
+        return _get_dashboard(refresh=refresh)
+    except Exception as e:
+        _log_exception(e, "dashboard")
+        return JSONResponse({"error": GENERIC_ERROR}, status_code=500)
 
 
 @app.get("/api/operations", response_model=list[Operation])
@@ -499,11 +619,11 @@ def api_operations():
         df["Date"] = df["Date"].dt.strftime("%Y-%m-%d").fillna("")
         return _df_to_records(df)
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 @app.post("/api/operations", response_model=MutationResult)
-async def api_operations_post(body: OperationCreate):
+def api_operations_post(body: OperationCreate):
     try:
         date_raw = body.Date
         product = str(body.Product or "").strip()
@@ -547,77 +667,199 @@ async def api_operations_post(body: OperationCreate):
             "ticker": ticker,
         }
 
-        df = loaders.load_operations()
-        df_new = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        df_new["Date"] = pd.to_datetime(df_new["Date"], errors="coerce")
-        loaders.save_operations(df_new)
+        with config.DATA_LOCK:
+            df = loaders.load_operations()
+            df_new = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+            df_new["Date"] = pd.to_datetime(df_new["Date"], errors="coerce")
+            loaders.save_operations(df_new)
 
-        global _dashboard_cache
-        _dashboard_cache = {}
+        _invalidate_dashboard()
 
         return {"ok": True, "row": row}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
+
+
+def _load_crypto_sorted() -> pd.DataFrame:
+    """Load crypto ops in a stable, deterministic order with positional index.
+
+    GET and the PUT/DELETE-by-id endpoints all go through this so a row's `id`
+    (its position) refers to the same row across calls (until the CSV changes).
+    The `fingerprint` (content hash) lets clients detect that a positional id
+    went stale; see _check_crypto_fingerprint.
+    """
+    df = loaders.load_crypto_operations()
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Date", "Product", "Coin", "Quantity", "ticker"])
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    return df.sort_values("Date", kind="mergesort").reset_index(drop=True)
+
+
+def _row_fingerprint(r) -> str:
+    return loaders.crypto_fingerprint(r["Date"], r["Coin"], r["Quantity"], r.get("ticker"))
+
+
+def _check_crypto_fingerprint(df: pd.DataFrame, row_id: int, fingerprint: str | None) -> None:
+    """409 if the client supplied a fingerprint and the row at `row_id` differs."""
+    if not fingerprint:
+        return
+    if _row_fingerprint(df.iloc[row_id]) != fingerprint:
+        raise HTTPException(
+            409,
+            "El movimiento ha cambiado desde que se cargó la lista. Recarga e inténtalo de nuevo.",
+        )
 
 
 @app.get("/api/crypto", response_model=list[CryptoOperation])
 def api_crypto():
     try:
-        df = loaders.load_crypto_operations()
-        if df is None or df.empty:
+        with config.DATA_LOCK:
+            df = _load_crypto_sorted()
+        if df.empty:
             return []
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d %H:%M").fillna("")
+        fps = [_row_fingerprint(r) for _, r in df.iterrows()]
+        df["Date"] = df["Date"].dt.strftime("%Y-%m-%d %H:%M").fillna("")
+        df.insert(0, "id", range(len(df)))
+        df.insert(1, "fingerprint", fps)
         return _df_to_records(df)
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
+
+
+_CRYPTO_DATE_FORMATS = (
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
+    "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+)
+_CRYPTO_MIN_DATE = pd.Timestamp("1990-01-01")
+
+
+def _parse_crypto_date(raw: str) -> pd.Timestamp:
+    txt = str(raw or "").strip()
+    for fmt in _CRYPTO_DATE_FORMATS:
+        try:
+            return pd.Timestamp(datetime.strptime(txt, fmt))
+        except ValueError:
+            continue
+    raise HTTPException(
+        400, "Fecha inválida: usa YYYY-MM-DD, 'YYYY-MM-DD HH:MM[:SS]' o DD/MM/YYYY."
+    )
+
+
+def _validate_crypto_body(body: CryptoOperationCreate) -> dict:
+    """Validate + normalise a crypto op payload into a persistable row dict."""
+    coin = str(body.Coin or "").strip().upper()
+    quantity = pd.to_numeric(body.Quantity, errors="coerce")
+    product = str(body.Product or "").strip()
+    ticker = str(body.ticker or "").strip()
+
+    dt = _parse_crypto_date(body.Date)
+    if dt < _CRYPTO_MIN_DATE:
+        raise HTTPException(400, "La fecha no puede ser anterior a 1990.")
+    if dt.normalize() > pd.Timestamp.today().normalize():
+        raise HTTPException(400, "La fecha no puede ser futura.")
+    if not coin:
+        raise HTTPException(400, "Coin es obligatorio")
+    if not re.fullmatch(r"[A-Z0-9._-]{1,32}", coin):
+        raise HTTPException(400, "Coin solo admite letras, números, '.', '_' y '-'.")
+    if pd.isna(quantity) or not np.isfinite(float(quantity)) or float(quantity) <= 0.0:
+        raise HTTPException(400, "Quantity debe ser un número positivo")
+
+    if not product:
+        product = coin
+    if not ticker:
+        ticker = f"{coin}-EUR"
+
+    return {
+        "Date": dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "Product": product,
+        "Coin": coin,
+        "Quantity": float(quantity),
+        "ticker": ticker,
+    }
 
 
 @app.post("/api/crypto", response_model=MutationResult)
-async def api_crypto_post(body: CryptoOperationCreate):
+def api_crypto_post(body: CryptoOperationCreate):
     try:
-        date_raw = body.Date
-        coin = str(body.Coin or "").strip().upper()
-        quantity = pd.to_numeric(body.Quantity, errors="coerce")
-        product = str(body.Product or "").strip()
-        ticker = str(body.ticker or "").strip()
+        row = _validate_crypto_body(body)
 
-        dt = pd.to_datetime(date_raw, errors="coerce")
-        if pd.isna(dt):
-            raise HTTPException(400, "Fecha inválida")
-        if not coin:
-            raise HTTPException(400, "Coin es obligatorio")
-        if pd.isna(quantity) or float(quantity) <= 0.0:
-            raise HTTPException(400, "Quantity debe ser un número positivo")
+        with config.DATA_LOCK:
+            df = loaders.load_crypto_operations()
+            df_new = pd.concat([df, pd.DataFrame([row])], ignore_index=True) if len(df) else pd.DataFrame([row])
+            df_new["Date"] = pd.to_datetime(df_new["Date"], errors="coerce")
+            loaders.save_crypto_operations(df_new)
+            # Re-adding a row by hand lifts a previous "deleted" mark on that key.
+            loaders.update_crypto_tombstones(
+                remove=[loaders.crypto_dedup_key(row["Date"], row["Coin"], row["Quantity"])]
+            )
 
-        if not product:
-            product = coin
-        if not ticker:
-            ticker = f"{coin}-EUR"
-
-        row = {
-            "Date": dt.strftime("%Y-%m-%d %H:%M:%S"),
-            "Product": product,
-            "Coin": coin,
-            "Quantity": float(quantity),
-            "ticker": ticker,
-        }
-
-        df = loaders.load_crypto_operations()
-        df_new = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        df_new["Date"] = pd.to_datetime(df_new["Date"], errors="coerce")
-        loaders.save_crypto_operations(df_new)
-
-        global _dashboard_cache
-        _dashboard_cache = {}
-
+        _invalidate_dashboard()
         return {"ok": True, "row": row}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
+
+
+@app.put("/api/crypto/{row_id}", response_model=MutationResult)
+def api_crypto_put(row_id: int, body: CryptoOperationCreate, fingerprint: str | None = None):
+    try:
+        row = _validate_crypto_body(body)
+        fingerprint = fingerprint or body.fingerprint
+
+        with config.DATA_LOCK:
+            df = _load_crypto_sorted()
+            if row_id < 0 or row_id >= len(df):
+                raise HTTPException(404, "Movimiento no encontrado")
+            _check_crypto_fingerprint(df, row_id, fingerprint)
+
+            old = df.iloc[row_id]
+            old_key = loaders.crypto_dedup_key(old["Date"], old["Coin"], old["Quantity"])
+            new_key = loaders.crypto_dedup_key(row["Date"], row["Coin"], row["Quantity"])
+
+            for col, val in row.items():
+                df.loc[row_id, col] = val
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            loaders.save_crypto_operations(df)
+            if old_key != new_key:
+                # Don't let the original exchange row resurrect on next ingestion.
+                loaders.update_crypto_tombstones(add=[old_key], remove=[new_key])
+
+        _invalidate_dashboard()
+        return {"ok": True, "row": row}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _internal_error(e)
+
+
+@app.delete("/api/crypto/{row_id}", response_model=MutationResult)
+def api_crypto_delete(row_id: int, fingerprint: str | None = None):
+    try:
+        with config.DATA_LOCK:
+            df = _load_crypto_sorted()
+            if row_id < 0 or row_id >= len(df):
+                raise HTTPException(404, "Movimiento no encontrado")
+            _check_crypto_fingerprint(df, row_id, fingerprint)
+
+            removed = df.iloc[row_id].where(pd.notna(df.iloc[row_id]), None).to_dict()
+            key = loaders.crypto_dedup_key(removed["Date"], removed["Coin"], removed["Quantity"])
+            if isinstance(removed.get("Date"), pd.Timestamp):
+                removed["Date"] = removed["Date"].strftime("%Y-%m-%d %H:%M:%S")
+            df = df.drop(index=row_id).reset_index(drop=True)
+            loaders.save_crypto_operations(df)
+            # Mark as deleted so re-ingesting the exchange export doesn't bring it back.
+            loaders.update_crypto_tombstones(add=[key])
+
+        _invalidate_dashboard()
+        return {"ok": True, "row": removed}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _internal_error(e)
 
 
 @app.get("/api/tax", response_model=TaxResponse)
@@ -632,7 +874,20 @@ def api_tax():
         currencies = df_merged["Coin"].dropna().unique().tolist()
         start_date = df_merged["Date"].min()
 
-        fx_rates = market_data.fetch_fx_rates(currencies, start_date)
+        # Same FX universe as the dashboard (cash currencies + crypto coins).
+        for cur in cash_store.load_cash():
+            if cur not in currencies and cur != "EUR":
+                currencies.append(cur)
+        df_crypto = loaders.load_crypto_operations()
+        crypto_coins: list[str] = []
+        if df_crypto is not None and len(df_crypto) > 0:
+            crypto_coins = df_crypto["Coin"].dropna().unique().tolist()
+            crypto_min = pd.to_datetime(df_crypto["Date"], errors="coerce").min()
+            if pd.notna(crypto_min) and (pd.isna(start_date) or crypto_min < start_date):
+                start_date = crypto_min
+
+        fx_rates = market_data.fetch_fx_rates(currencies, start_date,
+                                              crypto_coins=crypto_coins or None)
         df_adj   = core.SplitManager.apply_splits(df_merged)
         df_gains = tax.calculate_fifo_gains(df_adj, fx_rates)
 
@@ -652,7 +907,7 @@ def api_tax():
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 @app.get("/api/sources")
@@ -663,33 +918,103 @@ def api_sources_get():
                 return json.load(f)
         return {}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
+
+
+def _check_file_pattern(pattern: str, where: str) -> None:
+    if (not pattern.strip() or "/" in pattern or "\\" in pattern or ".." in pattern
+            or "\x00" in pattern):
+        raise HTTPException(
+            422, f"{where}: file_pattern no válido (no puede contener '/', '\\' ni '..')."
+        )
 
 
 @app.post("/api/sources", response_model=OkResponse)
-async def api_sources_post(request: Request):
+def api_sources_post(body: SourcesPayload):
+    """Replace sources.json. Typed + validated; malformed JSON → 422; atomic write."""
+    for key in ("stock_sources", "crypto_sources"):
+        for i, src in enumerate(getattr(body, key)):
+            _check_file_pattern(src.file_pattern, f"{key}[{i}]")
     try:
-        body = await request.json()
-        with open(config.SOURCES_FILE, "w", encoding="utf-8") as f:
-            json.dump(body, f, indent=4, ensure_ascii=False)
-        global _dashboard_cache
-        _dashboard_cache = {}          # invalidate cache
+        config.save_sources(body.model_dump(exclude_unset=True))
+        _invalidate_dashboard()
         return {"ok": True}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
+
+
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+_UPLOAD_CHUNK = 1024 * 1024
+
+
+def _inside_dir(root: str, path: str) -> bool:
+    """True if realpath(path) is inside realpath(root)."""
+    r = os.path.realpath(root)
+    p = os.path.realpath(path)
+    try:
+        return os.path.commonpath([r, p]) == r and p != r
+    except ValueError:      # different drives on Windows
+        return False
+
+
+def _safe_input_name(filename: str | None, *, strict: bool = False) -> str:
+    """Sanitise a client-supplied file name for input/. Raises HTTPException(400).
+
+    - non-strict (upload): takes the basename (after '\\' → '/') so browsers that
+      send full paths work, but rejects '..' segments outright.
+    - strict (delete): the name must already be a bare file name.
+    """
+    if not filename or not str(filename).strip():
+        raise HTTPException(400, "Nombre de archivo vacío.")
+    norm = str(filename).replace("\\", "/")
+    parts = norm.split("/")
+    if ".." in parts:
+        raise HTTPException(400, "Nombre de archivo no válido.")
+    base = parts[-1].strip()
+    if strict and base != filename:
+        raise HTTPException(400, "Nombre de archivo no válido.")
+    if (not base or base in (".", "..") or any(ord(c) < 32 for c in base)
+            or any(c in base for c in ':*?"<>|')):
+        raise HTTPException(400, "Nombre de archivo no válido.")
+    if not base.lower().endswith(".csv"):
+        raise HTTPException(400, "Solo se admiten archivos .csv.")
+    if not _inside_dir(config.INPUT_DIR, os.path.join(config.INPUT_DIR, base)):
+        raise HTTPException(400, "Nombre de archivo no válido.")
+    return base
 
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def api_upload(files: list[UploadFile] = File(...)):
+def api_upload(files: list[UploadFile] = File(...)):
     os.makedirs(config.INPUT_DIR, exist_ok=True)
-    saved = []
-    for f in files:
-        dest = os.path.join(config.INPUT_DIR, f.filename)
-        content = await f.read()
-        with open(dest, "wb") as fh:
-            fh.write(content)
-        saved.append(f.filename)
-    return {"saved": saved}
+    # Validate every name first so a bad one aborts the whole request.
+    names = [_safe_input_name(f.filename) for f in files]
+    tmp_paths: list[str] = []
+    try:
+        for f, name in zip(files, names):
+            fd, tmp = tempfile.mkstemp(dir=config.INPUT_DIR, prefix=".upload-", suffix=".tmp")
+            tmp_paths.append(tmp)
+            size = 0
+            with os.fdopen(fd, "wb") as fh:
+                while True:
+                    chunk = f.file.read(_UPLOAD_CHUNK)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            413, f"'{name}' supera el límite de {MAX_UPLOAD_BYTES // (1024 * 1024)} MB."
+                        )
+                    fh.write(chunk)
+        for tmp, name in zip(tmp_paths, names):
+            os.replace(tmp, os.path.join(config.INPUT_DIR, name))
+        tmp_paths = []
+    finally:
+        for tmp in tmp_paths:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return {"saved": names}
 
 
 @app.get("/api/source-data", response_model=list[SourceData])
@@ -744,7 +1069,9 @@ def api_source_data():
                     "entries":     entries,
                 })
             except Exception as e:
-                result.append({"source": name, "file": fname, "error": str(e), "entries": []})
+                _log_exception(e, f"source-data {fname}")
+                result.append({"source": name, "file": fname,
+                               "error": "No se pudo leer el archivo.", "entries": []})
     return result
 
 
@@ -825,7 +1152,11 @@ def _resolve_source_file(filename: str) -> str:
 def api_source_file_get(filename: str):
     """Return the raw CSV (columns + string cells) of a configured source file."""
     path = _resolve_source_file(filename)
-    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    try:
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError) as e:
+        config.get_logger().warning(f"api_source_file_get: {filename} ilegible: {e}")
+        raise HTTPException(400, "El archivo CSV está vacío o está corrupto.")
     df.columns = [str(c).strip() for c in df.columns]
     return {
         "file": os.path.basename(path),
@@ -840,47 +1171,79 @@ def api_source_file_put(filename: str, body: SourceFileContent):
     path = _resolve_source_file(filename)
     if not body.columns:
         raise HTTPException(400, "Se requiere al menos una columna.")
-    # Coerce every row to the column count (pad/truncate) to keep the CSV valid.
-    ncol = len(body.columns)
-    norm_rows = [(r + [""] * ncol)[:ncol] for r in body.rows]
+    columns = [str(c).strip() for c in body.columns]
+    if any(not c for c in columns):
+        raise HTTPException(422, "Hay columnas con nombre vacío.")
+    dups = sorted({c for c in columns if columns.count(c) > 1})
+    if dups:
+        raise HTTPException(422, f"Columnas duplicadas: {', '.join(dups)}.")
+    ncol = len(columns)
+    for i, r in enumerate(body.rows):
+        if len(r) != ncol:
+            raise HTTPException(
+                422, f"La fila {i + 1} tiene {len(r)} celdas pero hay {ncol} columnas."
+            )
 
-    loaders._backup_file(path)
-    df = pd.DataFrame(norm_rows, columns=body.columns)
-    df.to_csv(path, index=False)
+    with config.DATA_LOCK:
+        loaders._backup_file(path)
+        df = pd.DataFrame(body.rows, columns=columns)
+        config.atomic_to_csv(df, path, index=False)
     config.get_logger().info(
-        f"api_source_file_put: {len(norm_rows)} filas guardadas → {path}"
+        f"api_source_file_put: {len(body.rows)} filas guardadas → {path}"
     )
-    global _dashboard_cache
-    _dashboard_cache = {}
-    return {"file": os.path.basename(path), "columns": body.columns, "rows": norm_rows}
+    _invalidate_dashboard()
+    return {"file": os.path.basename(path), "columns": columns, "rows": body.rows}
 
 
 @app.delete("/api/pending-files/{filename}", response_model=OkResponse)
 def api_delete_pending(filename: str):
-    path = os.path.join(config.INPUT_DIR, filename)
-    if os.path.exists(path):
+    safe = _safe_input_name(filename, strict=True)
+    path = os.path.join(config.INPUT_DIR, safe)
+    if os.path.isfile(path):
         os.remove(path)
         return {"ok": True}
     raise HTTPException(404, "File not found")
 
 
-@app.get("/api/invalidate", response_model=OkResponse)
+@app.post("/api/invalidate", response_model=OkResponse)
 def api_invalidate():
-    global _dashboard_cache
-    _dashboard_cache = {}
+    _invalidate_dashboard()
     return {"ok": True}
+
+
+@app.get("/api/invalidate")
+def api_invalidate_get_not_allowed():
+    # Mutating action: GET is not allowed any more (use POST).
+    raise HTTPException(405, "Usa POST /api/invalidate.", headers={"Allow": "POST"})
 
 
 def _cash_response() -> dict:
     balances = cash_store.load_cash()
-    # Convert with cached FX if available (no network); EUR/unknown → rate 1.0.
+    # Convert with cached FX if available (no network), applying the same FX
+    # divisors as the dashboard (e.g. GBX/100). Currencies without a rate are
+    # NOT converted (rate 1.0) and are reported in `missing_fx` + `warning`.
     fx = market_data._load_cache(config.FX_CACHE_FILE)
-    eur = cash_store.cash_to_eur(balances, fx)
+    if fx is not None and not fx.empty:
+        fx = fx.copy()
+        for cur, divisor in config.get_fx_adjustments().items():
+            if cur in fx.columns and divisor:
+                fx[cur] = fx[cur] / divisor
+    missing: list[str] = []
+    eur = cash_store.cash_to_eur(balances, fx, missing=missing)
     entries = [
         {"currency": cur, "amount": round(amt, 2), "eur": eur.get(cur, round(amt, 2))}
         for cur, amt in sorted(balances.items())
     ]
-    return {"balances": entries, "total_eur": round(sum(e["eur"] for e in entries), 2)}
+    missing = sorted(set(missing))
+    return {
+        "balances": entries,
+        "total_eur": round(sum(e["eur"] for e in entries), 2),
+        "missing_fx": missing,
+        "warning": (
+            f"Sin tipo de cambio para {', '.join(missing)}: se muestra el importe sin convertir."
+            if missing else None
+        ),
+    }
 
 
 @app.get("/api/cash", response_model=CashResponse)
@@ -888,18 +1251,17 @@ def api_cash_get():
     try:
         return _cash_response()
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 @app.post("/api/cash", response_model=CashResponse)
 def api_cash_post(body: CashUpdate):
     try:
         cash_store.save_cash(body.balances)
-        global _dashboard_cache
-        _dashboard_cache = {}
+        _invalidate_dashboard()
         return _cash_response()
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 # Suggested classes offered in the UI (plus any class already used in overrides).
@@ -959,7 +1321,7 @@ def api_asset_classes():
         return {"known_classes": known, "items": items}
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -981,11 +1343,10 @@ def api_target_post(body: TargetConfig):
     """Persist the target config; invalidate the dashboard cache."""
     try:
         config.save_target_portfolio(body.model_dump())
-        global _dashboard_cache
-        _dashboard_cache = {}
+        _invalidate_dashboard()
         return body
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 @app.get("/api/rebalance", response_model=RebalanceResponse)
@@ -995,11 +1356,8 @@ def api_rebalance():
     Reuses the dashboard computation (net worth + class breakdown incl. cash),
     so it reflects the exact same figures shown on the Dashboard.
     """
-    global _dashboard_cache
     try:
-        if not _dashboard_cache:
-            _dashboard_cache = _build_dashboard()
-        dash = _dashboard_cache
+        dash = _get_dashboard()
         if dash.get("error"):
             raise HTTPException(400, dash["error"])
         net_worth = dash.get("net_worth") or 0.0
@@ -1010,7 +1368,7 @@ def api_rebalance():
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1040,7 +1398,6 @@ def api_process_preview():
 @app.post("/api/process", response_model=ProcessResult)
 def api_process():
     """Ingest pending CSVs from input/ into processing/ (mirrors CLI opts 2 & 3)."""
-    global _dashboard_cache
     stock_added = 0
     crypto_added = 0
     files_seen: list[str] = []
@@ -1068,7 +1425,7 @@ def api_process():
         except Exception as e:
             config.get_logger().warning(f"api_process crypto: {e}")
 
-        _dashboard_cache = {}
+        _invalidate_dashboard()
         return {
             "ok": True,
             "stock_added": stock_added,
@@ -1078,17 +1435,15 @@ def api_process():
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 def _to_float(v, default=0.0) -> float:
-    """Parse a possibly-string/European number into float."""
+    """Parse a possibly-string/European/US number into float."""
     if v is None or (isinstance(v, str) and not v.strip()):
         return default
-    try:
-        return float(str(v).replace('"', '').replace(',', '.'))
-    except ValueError:
-        return default
+    n = loaders._parse_number(v)
+    return default if n is None else n
 
 
 @app.post("/api/process/commit", response_model=ProcessResult)
@@ -1096,13 +1451,12 @@ def api_process_commit(body: ProcessCommit):
     """Persist the (possibly edited) rows the user confirmed in the preview,
     then delete the source files from input/. Unlike /api/process this saves
     exactly what the client sends — supporting edit/delete before saving."""
-    global _dashboard_cache
     stock_rows: list[dict] = []
     crypto_rows: list[dict] = []
     files_to_delete: set[str] = set()
 
     for f in body.files:
-        files_to_delete.add(os.path.basename(f.file))
+        files_to_delete.add(os.path.basename(str(f.file).replace("\\", "/")))
         if f.kind == "crypto":
             for e in f.entries:
                 coin = str(e.get("coin", "")).strip().upper()
@@ -1159,11 +1513,13 @@ def api_process_commit(body: ProcessCommit):
             if not fn.lower().endswith(".csv"):
                 continue
             p = os.path.join(config.INPUT_DIR, fn)
+            if fn in (".", "..") or not _inside_dir(config.INPUT_DIR, p):
+                continue
             if os.path.isfile(p):
                 os.remove(p)
                 deleted.append(fn)
 
-        _dashboard_cache = {}
+        _invalidate_dashboard()
         config.get_logger().info(
             f"api_process_commit: stock={stock_added} crypto={crypto_added} "
             f"archivos_borrados={deleted}"
@@ -1177,7 +1533,7 @@ def api_process_commit(body: ProcessCommit):
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(500, str(e))
+        raise _internal_error(e)
 
 
 def _latest_report() -> str | None:
@@ -1196,20 +1552,28 @@ def api_report_pdf():
 @app.post("/api/report/generate", response_model=ReportResult)
 def api_report_generate():
     """Run the full pipeline and generate a fresh PDF report."""
-    global _dashboard_cache
+    started = time.time()
     try:
         import main  # lazy: avoids importing the CLI menu at server startup
         main.run_analysis()
-        _dashboard_cache = {}
-        path = _latest_report()
-        return {
-            "ok": True,
-            "file": os.path.basename(path) if path else None,
-            "message": "Informe generado.",
-        }
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, str(e))
+    except BaseException as e:   # run_analysis may raise SystemExit on config errors
+        if isinstance(e, (KeyboardInterrupt, GeneratorExit)):
+            raise
+        _log_exception(e, "report/generate")
+        _invalidate_dashboard()
+        return JSONResponse(
+            {"ok": False, "file": None,
+             "message": "No se pudo generar el informe. Consulta el log del servidor."},
+            status_code=500,
+        )
+    _invalidate_dashboard()
+    path = _latest_report()
+    if not path or os.path.getmtime(path) < started - 2:
+        return JSONResponse(
+            {"ok": False, "file": None, "message": "El análisis terminó pero no se generó ningún PDF nuevo."},
+            status_code=500,
+        )
+    return {"ok": True, "file": os.path.basename(path), "message": "Informe generado."}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1233,9 +1597,11 @@ def index():
 
 @app.get("/{path:path}")
 def spa_fallback(path: str):
+    if path == "api" or path.startswith("api/"):
+        raise HTTPException(404, "Not found")
     full = os.path.join(WEB_DIR, path)
-    if os.path.isfile(full):
-        return FileResponse(full)
+    if _inside_dir(WEB_DIR, full) and os.path.isfile(full):
+        return FileResponse(os.path.realpath(full))
     return _index_response()
 
 
@@ -1245,5 +1611,8 @@ def spa_fallback(path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    print("🚀  Global Position → http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Local-only by default: this app has no auth. Override with GP_HOST (e.g. 0.0.0.0)
+    # only on a trusted network.
+    _host = os.environ.get("GP_HOST", "127.0.0.1")
+    print(f"🚀  Global Position → http://{_host}:8000")
+    uvicorn.run(app, host=_host, port=8000)

@@ -1,3 +1,5 @@
+> **Documento histórico: migración completada.** Se conserva como registro del plan original; el estado actual está en [README.md](README.md).
+
 # Plan de migración: GlobalPosition.ipynb → Global-Position con frontend moderno
 
 > **Fecha:** 2026-07-03

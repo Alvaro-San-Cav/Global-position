@@ -274,10 +274,9 @@ class TestCryptoPortfolio:
         """Último día: (0.5+0.3) BTC × 44000 EUR/BTC = 35200."""
         df_crypto, fx, dates = crypto_data
         vtc, aporte, vceur = calculate_crypto_portfolio(df_crypto, fx)
-        # Last common date value
+        # The series now extends to today with the last known rate carried forward
         assert vtc is not None
-        last_shared = vtc.index[-1]
-        expected = 0.8 * fx.loc[last_shared, "BTC"]
+        expected = 0.8 * fx["BTC"].iloc[-1]
         assert np.isclose(vtc.iloc[-1], expected, rtol=0.01)
 
     def test_aporte_crypto(self, crypto_data):

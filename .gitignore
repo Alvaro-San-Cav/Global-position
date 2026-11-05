@@ -40,3 +40,19 @@ node_modules/
 
 # Local archive (large binaries; original notebook lives in GlobalPositionPersonal/)
 docs/archive/
+
+# Lint cache
+.ruff_cache/
+
+# Windows shortcuts
+*.lnk
+
+# Server runtime files (already covered by processing/ and *.log; explicit for clarity)
+backend/processing/server.pid
+backend/processing/server.log
+processing/server.pid
+processing/server.log
+processing/server.err.log
+
+# Claude Code local settings
+.claude/settings.local.json

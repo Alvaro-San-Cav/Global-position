@@ -30,21 +30,25 @@ Global-Position/
 │   │   ├── market_data.py   # Tickers, precios con caché, tipos de cambio
 │   │   ├── core.py          # Splits, valoración, TWR, benchmark, métricas
 │   │   ├── tax.py           # Plusvalías fiscales FIFO
+│   │   ├── cash.py          # Registro de efectivo en cuenta (processing/cash.json)
+│   │   ├── target.py        # Cartera objetivo y cálculo de rebalanceo
 │   │   └── reporter.py      # Informe PDF (matplotlib)
-│   └── tests/               # 61 tests (lógica, loaders, integración, API)
+│   └── tests/               # pytest: lógica, loaders, integración, API, efectivo
 │
 ├── frontend/                # SPA React + Vite + TypeScript + Tailwind v4
 │   ├── src/
 │   │   ├── api/             # client.ts, queries.ts, types.ts, schema.d.ts
 │   │   ├── components/      # ui/ (shadcn), charts/, dashboard/, layout/…
-│   │   ├── pages/           # Dashboard, Operations, Crypto, Tax, Import, Settings
+│   │   ├── pages/           # Dashboard, Operations, Crypto, Tax, Objetivo, Import, Settings
 │   │   └── lib/             # format.ts (es-ES), utils.ts
 │   └── dist/                # Build de producción (generado, gitignored)
 │
 ├── input/                   # CSVs nuevos a importar
-├── processing/              # operaciones.csv, crypto.csv, cache/, backup/
+├── processing/              # operaciones.csv, crypto.csv, cash.json, target, cache/, backup/
 ├── output/                  # PDFs e histórico (hist-inf/)
 ├── run.ps1                  # Lanzador (dev / build / serve / test)
+├── launch-app.ps1 / .vbs    # Lanzador de escritorio (servidor oculto + Chrome en modo app)
+├── create-desktop-shortcut.ps1  # Crea el acceso directo «Global Position» en el escritorio
 └── docs/paridad.md          # Verificación de paridad con el notebook original
 ```
 
@@ -90,8 +94,39 @@ Descargar CSV de Degiro/Binance → arrastrar a "Importar" en la web
 | **Operaciones** | Tabla con orden y filtros (ticker, moneda, fechas, búsqueda); alta manual |
 | **Crypto** | Movimientos, balance por moneda con valor EUR |
 | **Fiscalidad** | Resumen FIFO por año fiscal y ticker, detalle de ventas, export CSV |
+| **Objetivo** | Cartera objetivo por clase/activo y propuesta de rebalanceo (`/api/target`, `/api/rebalance`) |
 | **Importar** | Upload drag & drop, archivos pendientes/fuente, procesar |
 | **Ajustes** | Editor de `sources.json` (fuentes, benchmark, ajustes precio/FX, JSON raw) |
+
+### Efectivo y cartera objetivo
+
+- **Efectivo:** el efectivo en cuenta se registra vía `/api/cash` (GET/POST),
+  lógica en `backend/src/cash.py`, persistido en `processing/cash.json`. Se
+  muestra en el desglose por clase del Dashboard y se edita desde ahí.
+- **Objetivo / rebalanceo:** la cartera objetivo se define con `/api/target`
+  (GET/POST, lógica en `backend/src/target.py`) y `/api/rebalance` calcula las
+  compras/ventas necesarias para acercar la cartera actual al objetivo. Se
+  gestiona desde la página **Objetivo**.
+
+### Lanzador de escritorio (Windows)
+
+```powershell
+.\create-desktop-shortcut.ps1   # crea «Global Position.lnk» en el escritorio (una vez)
+.\launch-app.ps1                # arranca el servidor si hace falta y abre Chrome en modo app
+.\launch-app.ps1 -Stop          # para el servidor lanzado por el lanzador (por PID)
+```
+
+El acceso directo apunta a `launch-app.vbs` (wscript, sin parpadeo de consola),
+que ejecuta `launch-app.ps1` oculto. Éste reconstruye el frontend si hay código
+más nuevo que el build, comprueba `/api/health`, guarda el PID en
+`processing/server.pid` y la salida en `processing/server.log` /
+`processing/server.err.log`.
+
+### Seguridad
+
+La API **solo escucha en `127.0.0.1`** (no es accesible desde la red local) y no
+tiene autenticación: no la expongas a otras interfaces ni a Internet. Los datos
+personales (`input/`, `processing/`, `output/`) están en `.gitignore`.
 
 ### CLI (equivalente, sin navegador)
 
@@ -130,9 +165,11 @@ cd frontend; pnpm gen:api    # requiere el backend levantado
 .\run.ps1 test          # pytest backend + vitest frontend
 ```
 
-- Backend: 61 tests (lógica financiera, loaders/dedup, integración con mocks de
-  yfinance, contratos de API). No requieren red.
-- Frontend: formateadores, KpiGrid, DataTable.
+- Backend (pytest): lógica financiera, loaders/dedup, efectivo, integración con
+  mocks de yfinance y contratos de API. No requieren red. Dependencias de test:
+  `pip install -r backend/requirements-dev.txt`.
+- Frontend (vitest): formateadores, KpiGrid, DataTable, CapitalDelta y otros
+  componentes.
 
 ---
 

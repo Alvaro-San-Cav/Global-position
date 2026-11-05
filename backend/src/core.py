@@ -8,6 +8,8 @@ Faithfully ports the notebook logic for:
   • TWR (Time-Weighted Return)    (daily chain-linking)
 """
 
+import logging
+import re
 from collections import defaultdict
 
 import numpy as np
@@ -36,14 +38,37 @@ _CLASS_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
       "GLOBAL X", " ETC", "INDEX FUND")),
 ]
 
-_CRYPTO_SYMBOLS = {"BTC", "ETH", "USDT", "USDC", "BNB", "SOL", "ADA", "XRP", "DOGE"}
+_CRYPTO_SYMBOLS = {
+    "BTC", "ETH", "USDT", "USDC", "BNB", "SOL", "ADA", "XRP", "DOGE",
+    "LTC", "DOT", "LINK", "AVAX", "MATIC", "POL", "TRX", "XLM", "ATOM", "BCH",
+    "SHIB", "ALGO", "XMR", "DAI", "AAVE", "MKR",
+}
+
+# Keywords that are word stems (they may be followed by more letters, e.g.
+# "COMMODITIES", "OBLIGACIONES"). Every other keyword must match as a whole
+# word (optionally plural), so "GOLD" does not hit "GOLDMAN SACHS", "OIL" does
+# not hit "BOILER" and "ETC" does not hit "ETCHING".
+_STEM_KEYWORDS = {"COMMODIT", "OBLIGATION", "OBLIGACION"}
+
+
+def _keyword_regex(kw: str) -> "re.Pattern[str]":
+    core_kw = kw.strip()
+    left = r"(?<![A-Z0-9])"
+    if core_kw in _STEM_KEYWORDS:
+        return re.compile(left + re.escape(core_kw))
+    return re.compile(left + re.escape(core_kw) + r"(?:S|ES)?(?![A-Z0-9])")
+
+
+_CLASS_PATTERNS: list[tuple[str, list["re.Pattern[str]"]]] = [
+    (cls, [_keyword_regex(k) for k in kws]) for cls, kws in _CLASS_KEYWORDS
+]
 
 
 def classify_asset(symbol: str, product: str = "", overrides: dict[str, str] | None = None) -> str:
     """Return a general asset class for a holding.
 
     Priority: explicit override (by symbol) > crypto symbol > keyword match on
-    "SYMBOL PRODUCT" > default "Acciones".
+    "SYMBOL PRODUCT" (whole-word regex) > default "Acciones".
     """
     sym = str(symbol or "").strip().upper()
     if overrides and sym in overrides:
@@ -52,8 +77,8 @@ def classify_asset(symbol: str, product: str = "", overrides: dict[str, str] | N
         return "Cripto"
 
     hay = f" {sym} {str(product or '').upper()} "
-    for cls, keywords in _CLASS_KEYWORDS:
-        if any(kw in hay for kw in keywords):
+    for cls, patterns in _CLASS_PATTERNS:
+        if any(p.search(hay) for p in patterns):
             return cls
     return "Acciones"
 
@@ -236,6 +261,84 @@ class SplitManager:
         return df_adj
 
 
+_log = logging.getLogger(__name__)
+
+
+def _lookup_fx_rates(dates, coins, fx: pd.DataFrame, what: str = "operaciones") -> np.ndarray:
+    """Coin->EUR rate for each (date, coin) pair, never silently NaN.
+
+    Uses the rate of the day, else the nearest previous one (ffill) and, for
+    dates before the first available rate, the first available one (bfill).
+    ``EUR`` is always 1.0 even if the frame has no EUR column. If a coin has no
+    rate at all the result is NaN for those rows and a warning is logged.
+    """
+    dates = pd.DatetimeIndex(pd.to_datetime(pd.Series(list(dates)), errors='coerce'))
+    coins = np.asarray([None if (c is None or (isinstance(c, float) and np.isnan(c))) else str(c).strip()
+                        for c in coins], dtype=object)
+    out = np.full(len(dates), np.nan)
+    if len(dates) == 0:
+        return out
+
+    fxf = fx.copy()
+    fxf.index = pd.to_datetime(fxf.index)
+    fxf = fxf[~fxf.index.duplicated(keep='last')].sort_index().ffill().bfill()
+
+    if len(fxf):
+        pos = fxf.index.get_indexer(dates, method='ffill')
+        n_before = int(((pos < 0) & ~dates.isna()).sum())
+        pos = np.where(pos < 0, 0, pos)
+    else:
+        pos = np.zeros(len(dates), dtype=int)
+        n_before = 0
+
+    for coin in {c for c in coins if c is not None}:
+        mask = coins == coin
+        if coin in fxf.columns and len(fxf):
+            out[mask] = fxf[coin].to_numpy(dtype=float)[pos[mask]]
+        elif coin.upper() == 'EUR':
+            out[mask] = 1.0
+    if n_before:
+        _log.warning("FX (%s): %d fila(s) anteriores al primer tipo disponible; "
+                     "se usa el primer tipo conocido.", what, n_before)
+    n_nan = int((np.isnan(out) & np.array([c is not None for c in coins])).sum())
+    if n_nan:
+        _log.warning("FX (%s): %d fila(s) sin tipo de cambio disponible (quedan sin valorar).",
+                     what, n_nan)
+    return out
+
+
+def _stock_flow_eur(df_ops: pd.DataFrame) -> pd.Series:
+    """Signed EUR cash flow per operation (+buy / -sell), shared by the portfolio
+    calculation and the failed-assets summary so both use the same capital rule.
+
+    Prefers the broker ``Value``; falls back to qty*price*fx when Value is
+    missing. Needs ``EST_eur`` (price in EUR) and ``Quantity`` columns.
+    """
+    raw_qty = pd.to_numeric(df_ops['Quantity'], errors='coerce').fillna(0.0)
+    qty_sign = np.sign(raw_qty)
+
+    value_eur = pd.to_numeric(df_ops.get('Value', pd.Series(np.nan, index=df_ops.index)),
+                              errors='coerce')
+    flow_from_value = value_eur.abs() * qty_sign
+
+    est_eur = pd.to_numeric(df_ops['EST_eur'], errors='coerce').fillna(0.0)
+    flow_estimated_qty = raw_qty.abs() * est_eur * qty_sign
+    flow_estimated_unit = est_eur * qty_sign
+
+    flow = flow_from_value.where(~value_eur.isna(), flow_estimated_qty)
+
+    # Some custom sources (e.g. SAP vest feeds) request notebook-like fallback
+    # when Value==0 via sources.json (zero_value_flow_from_est_eur_tickers).
+    special_tickers = set(config.get_zero_value_flow_from_est_tickers())
+    if special_tickers and 'ticker' in df_ops.columns:
+        ticker_s = df_ops['ticker'].fillna('').astype(str).str.strip()
+        use_unit_est_mask = value_eur.eq(0) & ticker_s.isin(special_tickers)
+        if use_unit_est_mask.any():
+            flow = flow.copy()
+            flow.loc[use_unit_est_mask] = flow_estimated_unit[use_unit_est_mask]
+    return flow
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  STOCK PORTFOLIO VALUATION    (notebook steps 4-5)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -258,24 +361,9 @@ def calculate_stock_portfolio(df_ops, prices, fx_rates):
     all_days = prices.index  # full daily range from market_data
 
     # ── 1. Add FX rate & EUR-estimated price per operation ──────────────
-    def _add_fx(df, fx):
-        """Notebook: añadir_fx_rate()"""
-        fx = fx.sort_index().ffill()
-        fx_lookup = fx.copy()
-        fx_lookup['Fecha'] = fx_lookup.index
-
-        merged = pd.merge(df, fx_lookup, left_on='Date', right_on='Fecha', how='left')
-        merged['fx_rate'] = merged.apply(
-            lambda row: row.get(row['Coin'], np.nan) if pd.notna(row.get('Coin')) else np.nan,
-            axis=1,
-        )
-        merged['EST_eur'] = merged['Price'] * merged['fx_rate']
-        # Drop the added FX columns
-        drop_cols = list(fx.columns) + ['Fecha']
-        merged.drop(columns=[c for c in drop_cols if c in merged.columns], inplace=True)
-        return merged
-
-    df_ops = _add_fx(df_ops, fx_rates)
+    df_ops = df_ops.reset_index(drop=True)
+    df_ops['fx_rate'] = _lookup_fx_rates(df_ops['Date'], df_ops['Coin'], fx_rates, "acciones")
+    df_ops['EST_eur'] = df_ops['Price'] * df_ops['fx_rate']
 
     # ── 2. Cumulative quantities ────────────────────────────────────────
     qty_col = 'Quantity_adj' if 'Quantity_adj' in df_ops.columns else 'Quantity'
@@ -301,30 +389,9 @@ def calculate_stock_portfolio(df_ops, prices, fx_rates):
     valor_total_cartera = valor_cartera.sum(axis=1)
 
     # ── 5. Capital aportado acumulado ───────────────────────────────────
-    # Prefer broker cash flow (Value) for invested capital. We only use
-    # qty*price*fx as fallback when Value is missing. Optionally, some custom
-    # sources (e.g. SAP vest feeds) can request notebook-like fallback when
-    # Value==0 via sources.json (zero_value_flow_from_est_eur_tickers).
-    raw_qty = pd.to_numeric(df_ops['Quantity'], errors='coerce').fillna(0.0)
-    qty_sign = raw_qty.apply(lambda q: 1.0 if q > 0 else (-1.0 if q < 0 else 0.0))
-
-    value_eur = pd.to_numeric(df_ops.get('Value', np.nan), errors='coerce')
-    flow_from_value = value_eur.abs() * qty_sign
-
-    est_eur = pd.to_numeric(df_ops['EST_eur'], errors='coerce').fillna(0.0)
-    flow_estimated_qty = raw_qty.abs() * est_eur * qty_sign
-    flow_estimated_unit = est_eur * qty_sign
-
-    df_ops['_flow_eur'] = flow_from_value.where(~value_eur.isna(), flow_estimated_qty)
-
-    special_tickers = set(config.get_zero_value_flow_from_est_tickers())
-    if special_tickers and 'ticker' in df_ops.columns:
-        ticker_s = df_ops['ticker'].fillna('').astype(str).str.strip()
-        zero_value_mask = value_eur.eq(0)
-        special_mask = ticker_s.isin(special_tickers)
-        use_unit_est_mask = zero_value_mask & special_mask
-        if use_unit_est_mask.any():
-            df_ops.loc[use_unit_est_mask, '_flow_eur'] = flow_estimated_unit[use_unit_est_mask]
+    # Prefer broker cash flow (Value); qty*price*fx only as fallback (see
+    # _stock_flow_eur).
+    df_ops['_flow_eur'] = _stock_flow_eur(df_ops)
 
     aporte_diario = (
         df_ops.groupby('Date')['_flow_eur']
@@ -332,7 +399,6 @@ def calculate_stock_portfolio(df_ops, prices, fx_rates):
         .reindex(all_days, fill_value=0)
         .cumsum()
     )
-    df_ops.drop(columns=['_flow_eur'], inplace=True, errors='ignore')
 
     return valor_total_cartera, aporte_diario, valor_cartera
 
@@ -346,90 +412,83 @@ def calculate_crypto_portfolio(df_crypto, fx_rates):
     Parameters
     ----------
     df_crypto : DataFrame  with Date, Coin, Quantity
-    fx_rates  : DataFrame  with coins as columns (BTC, ETH…) and EUR→coin rates
+    fx_rates  : DataFrame  with coins as columns (BTC, ETH...) and coin->EUR rates
 
     Returns
     -------
-    valor_total_crypto          : Series  – daily total crypto value (EUR)
-    aporte_crypto_eur_acumulado : Series  – cumulative cost basis (EUR)
-    valor_crypto_eur            : DataFrame – value per coin (EUR)
+    valor_total_crypto          : Series  - daily total crypto value (EUR)
+    aporte_crypto_eur_acumulado : Series  - cumulative net invested capital (EUR)
+    valor_crypto_eur            : DataFrame - value per coin (EUR)
+
+    Capital aportado (M2): every movement is a signed EUR flow valued at the
+    coin->EUR rate of its day. Buys / inflows (Quantity>0) add capital; sells /
+    outflows (Quantity<0) SUBTRACT the proceeds at that day's rate. This mirrors
+    the stock side (broker Value is negative on sells) and keeps TWR correct,
+    because a withdrawal of V euros must leave the portfolio as -V. Consequence:
+    net capital can fall below cost basis (even negative) after selling at a
+    profit; metrics already guard ``cap > 0``.
+
+    FX alignment (M3): rates are forward-filled and, for days before the first
+    available rate, back-filled with the first known rate (a warning is logged),
+    so operations earlier than the FX history are not discarded.
     """
     if df_crypto is None or len(df_crypto) == 0:
         return None, None, None
 
     df_crypto = df_crypto.copy()
     df_crypto['Date_dt'] = pd.to_datetime(df_crypto['Date'], errors='coerce')
-    df_crypto['Date_day'] = df_crypto['Date_dt'].dt.date
+    df_crypto['Date_day'] = df_crypto['Date_dt'].dt.normalize()
     df_crypto['Quantity'] = pd.to_numeric(df_crypto['Quantity'], errors='coerce')
     df_crypto = df_crypto.dropna(subset=['Quantity', 'Date_dt'])
+    if df_crypto.empty:
+        return None, None, None
     df_crypto = df_crypto.sort_values('Date_dt')
 
     coins = df_crypto['Coin'].dropna().unique().tolist()
 
-    # Daily change per coin
-    df_diario = df_crypto.groupby(['Date_day', 'Coin'])['Quantity'].sum().unstack(fill_value=0)
-    all_days = pd.date_range(df_diario.index.min(), pd.Timestamp.today().normalize()).date
-    df_diario = df_diario.reindex(all_days, fill_value=0)
-
-    # Cumulative balance
-    df_acumulado = df_diario.cumsum()
-    df_acumulado.index = pd.to_datetime(df_acumulado.index)
-
-    # Extend to today
-    fecha_final = pd.Timestamp.today().normalize()
-    fechas = pd.date_range(df_acumulado.index.min(), fecha_final, freq='D')
-    df_acumulado = df_acumulado.reindex(fechas, method='ffill')
-
-    # Align with FX rates
     fx_rates = fx_rates.copy()
     fx_rates.index = pd.to_datetime(fx_rates.index)
-    common = df_acumulado.index.intersection(fx_rates.index)
+    fx_rates = fx_rates[~fx_rates.index.duplicated(keep='last')].sort_index()
 
-    coins_available = [c for c in coins if c in df_acumulado.columns and c in fx_rates.columns]
+    coins_available = [c for c in coins if c in fx_rates.columns and fx_rates[c].notna().any()]
     if not coins_available:
         return None, None, None
 
-    df_acum_a = df_acumulado.loc[common, coins_available]
-    df_fx_a   = fx_rates.loc[common, coins_available]
+    # Daily change per coin -> cumulative balance over the full daily calendar.
+    df_diario = df_crypto.groupby(['Date_day', 'Coin'])['Quantity'].sum().unstack(fill_value=0)
+    fechas = pd.date_range(df_diario.index.min(), pd.Timestamp.today().normalize(), freq='D')
+    df_acumulado = df_diario.reindex(fechas, fill_value=0).cumsum()
+    df_acum_a = df_acumulado[[c for c in coins_available if c in df_acumulado.columns]]
 
-    # FX rates are EUR→coin  (from market_data); crypto coins like BTC-EUR
-    # come back as coin→EUR already.  The notebook inverts them because its
-    # rates are stored as  1/price  (EUR per coin).  Our market_data returns
-    # the rate already as coin→EUR for crypto, so we just multiply directly.
+    # Rates aligned to the crypto calendar: ffill, then bfill the first known rate.
+    fx_cal = fx_rates[coins_available].reindex(fx_rates.index.union(fechas)).ffill().bfill().loc[fechas]
+    if fx_rates.index.min() > fechas[0]:
+        _log.warning("Cripto: hay operaciones desde %s pero el FX empieza el %s; "
+                     "se usa el primer tipo conocido para ese tramo.",
+                     fechas[0].date(), fx_rates.index.min().date())
+    df_fx_a = fx_cal[df_acum_a.columns]
+
+    # FX rates are coin->EUR already (BTC-EUR), so value = balance * rate.
     valor_crypto_eur = df_acum_a * df_fx_a
     valor_total_crypto = valor_crypto_eur.sum(axis=1)
 
-    # ── Cost basis (capital aportado) ───────────────────────────────────
-    # Notebook: for buys (Change > 0), EUR paid = Change / fx_rate_of_day
-    # with notebook's fx_rate = EUR→coin, so EUR = Qty / rate.
-    # Since our fx_rates are coin→EUR, EUR paid = Qty * rate.
-    df_buys = df_crypto[df_crypto['Quantity'] > 0].copy()
-    df_buys['Date_day_dt'] = pd.to_datetime(df_buys['Date_day'])
-
-    fx_lookup = fx_rates.copy()
-    fx_lookup['Date_day_dt'] = fx_lookup.index
-
-    df_buys = df_buys.merge(fx_lookup, on='Date_day_dt', how='left', suffixes=('', '_fx'))
-
-    def _get_rate(row):
-        coin = row['Coin']
-        return row.get(coin, np.nan)
-
-    df_buys['fx_rate'] = df_buys.apply(_get_rate, axis=1)
-    df_buys['EUR_pagado'] = df_buys['Quantity'] * df_buys['fx_rate']
+    # -- Net invested capital: signed flows at the fx of the day (see docstring)
+    df_flow = df_crypto[df_crypto['Coin'].isin(coins_available)].copy()
+    df_flow['fx_rate'] = _lookup_fx_rates(df_flow['Date_day'], df_flow['Coin'], fx_rates, "cripto")
+    df_flow['EUR_flujo'] = (df_flow['Quantity'] * df_flow['fx_rate']).fillna(0.0)
 
     aporte = (
-        df_buys.groupby('Date_day_dt')['EUR_pagado']
+        df_flow.groupby('Date_day')['EUR_flujo']
         .sum()
+        .reindex(fechas, fill_value=0.0)
         .cumsum()
-        .reindex(fechas, method='ffill')
-        .fillna(0)
     )
 
-    # Start the crypto series when investment actually begins (first positive buy).
-    # This avoids showing a pre-investment flat segment in the dashboard chart.
-    first_investment_date = aporte[aporte > 0].index.min() if not aporte.empty else None
-    if pd.notna(first_investment_date):
+    # Start the crypto series at the first inflow (first positive Quantity) to
+    # avoid a pre-investment flat segment in the dashboard chart.
+    buys = df_flow[df_flow['Quantity'] > 0]
+    if not buys.empty:
+        first_investment_date = buys['Date_day'].min()
         valor_total_crypto = valor_total_crypto.loc[valor_total_crypto.index >= first_investment_date]
         aporte = aporte.loc[aporte.index >= first_investment_date]
         valor_crypto_eur = valor_crypto_eur.loc[valor_crypto_eur.index >= first_investment_date]
@@ -490,11 +549,21 @@ def compute_twr(values: pd.Series, cum_contribs: pd.Series,
         else:
             raise ValueError("flow_at must be 'start', 'end' or 'auto'")
 
+        # Skip days before the portfolio is established. Guarding on `denom`
+        # alone is insufficient: a contribution (CF) into a not-yet-valued
+        # portfolio inflates denom past the threshold while V_prev is still 0,
+        # yielding a spurious r = -1.0 that clamps to -0.99 and collapses the
+        # chain-linked product to -100%. Key the guard on V_prev instead.
+        # Also skip non-finite inputs (NaN value/flow would poison the chain).
+        if not np.isfinite(V_prev) or V_prev < 1.0:
+            continue
         # Skip days where the portfolio barely exists (avoids div-by-tiny)
-        if abs(denom) < 1.0:
+        if not np.isfinite(denom) or abs(denom) < 1.0:
             continue
 
         r = numer / denom
+        if not np.isfinite(r):
+            continue
 
         # Clamp extreme single-day returns to avoid chain-link blowups
         r = max(min(r, 5.0), -0.99)
@@ -594,30 +663,18 @@ def summarize_failed_assets(df_failed_ops, df_failed_crypto, fx_rates):
     if df_failed_ops is not None and not df_failed_ops.empty:
         df_ops = df_failed_ops.copy()
         
-        # Calculate EST_eur for each operation to get invested capital
+        # EST_eur per operation, then the same capital rule as
+        # calculate_stock_portfolio (broker Value first, qty*price*fx fallback).
         df_ops['Date'] = normalize_date_series(df_ops['Date'])
-        fx = fx_rates.copy()
-        fx.index = normalize_date_series(fx.index)
-        fx = fx.sort_index().ffill()
-        
-        fx_lookup = fx.copy()
-        fx_lookup['Fecha'] = fx_lookup.index
-        merged = pd.merge(df_ops, fx_lookup, left_on='Date', right_on='Fecha', how='left')
-        merged['fx_rate'] = merged.apply(
-            lambda row: row.get(row['Coin'], np.nan) if pd.notna(row.get('Coin')) else np.nan,
-            axis=1,
-        )
+        merged = df_ops.reset_index(drop=True)
+        merged['fx_rate'] = _lookup_fx_rates(merged['Date'], merged['Coin'], fx_rates,
+                                             "activos fallidos")
         merged['EST_eur'] = merged['Price'] * merged['fx_rate']
-        
+
         qty_col = 'Quantity_adj' if 'Quantity_adj' in merged.columns else 'Quantity'
-        merged['_qty_signed'] = merged[qty_col]
-        
-        # Invested capital logic (same as calculate_stock_portfolio)
-        merged['_flow_eur'] = merged['_qty_signed'].abs() * merged['EST_eur']
-        merged['_flow_eur'] = merged['_flow_eur'] * merged['_qty_signed'].apply(
-            lambda q: 1.0 if q > 0 else (-1.0 if q < 0 else 0.0)
-        )
-        
+        merged['_qty_signed'] = pd.to_numeric(merged[qty_col], errors='coerce').fillna(0.0)
+        merged['_flow_eur'] = _stock_flow_eur(merged)
+
         for ticker, group in merged.groupby('ticker'):
             qty = group['_qty_signed'].sum()
             invested = group['_flow_eur'].sum()
@@ -636,31 +693,18 @@ def summarize_failed_assets(df_failed_ops, df_failed_crypto, fx_rates):
         df_cry['Date_day'] = df_cry['Date_dt'].dt.date
         df_cry['Quantity'] = pd.to_numeric(df_cry['Quantity'], errors='coerce')
         
-        # Calculate invested capital
-        fx = fx_rates.copy()
-        fx.index = pd.to_datetime(fx.index)
-        fx_lookup = fx.copy()
-        fx_lookup['Date_day_dt'] = fx_lookup.index
-        
-        df_buys = df_cry[df_cry['Quantity'] > 0].copy()
-        if not df_buys.empty:
-            df_buys['Date_day_dt'] = pd.to_datetime(df_buys['Date_day'])
-            df_buys = df_buys.merge(fx_lookup, on='Date_day_dt', how='left')
-            
-            def _get_rate(row):
-                coin = row['Coin']
-                return row.get(coin, np.nan)
-                
-            df_buys['fx_rate'] = df_buys.apply(_get_rate, axis=1)
-            df_buys['EUR_pagado'] = df_buys['Quantity'] * df_buys['fx_rate']
-        
+        # Net invested capital: signed flows at the day's rate (as in
+        # calculate_crypto_portfolio).
+        df_cry = df_cry.dropna(subset=['Quantity', 'Date_dt'])
+        df_cry['fx_rate'] = _lookup_fx_rates(df_cry['Date_dt'].dt.normalize(), df_cry['Coin'],
+                                             fx_rates, "cripto fallido")
+        df_cry['EUR_flujo'] = (df_cry['Quantity'] * df_cry['fx_rate']).fillna(0.0)
+
         for coin, group in df_cry.groupby('Coin'):
             qty = group['Quantity'].sum()
             
-            invested_capital = 0.0
-            if not df_buys.empty:
-                invested_capital = df_buys[df_buys['Coin'] == coin]['EUR_pagado'].sum()
-                
+            invested_capital = group['EUR_flujo'].sum()
+
             if abs(qty) > 1e-8 or abs(invested_capital) > 1e-2:
                 rows.append({
                     'Asset': coin,
@@ -679,6 +723,14 @@ def summarize_failed_assets(df_failed_ops, df_failed_crypto, fx_rates):
 def compute_metrics(valor_total_cartera, aporte_diario,
                      valor_total_crypto, aporte_crypto,
                      valor_crypto_eur) -> dict:
+    """Consolidated dashboard metrics.
+
+    Limitation (B2): ``cagr_*`` is ``(valor / capital_aportado) ** (1/años) - 1``.
+    It treats all capital as if invested on day 0, so with staggered
+    contributions it understates the real annualised return (and is distorted
+    when capital is net of withdrawals). A money-weighted XIRR would be the
+    precise figure; use the TWR fields for a flow-neutral measure.
+    """
     m: dict = {}
     has_crypto = (valor_total_crypto is not None and not valor_total_crypto.empty)
 
@@ -709,7 +761,7 @@ def compute_metrics(valor_total_cartera, aporte_diario,
     # ── Crypto ───────────────────────────────────────────────────────
     cap_cry = val_cry = pv_cry = rent_cry = cagr_cry = 0.0
     twr_cry_t = twr_cry_a = 0.0
-    dias_cry = anhos_cry = 0
+    dias_cry = 0
 
     if has_crypto and aporte_crypto is not None:
         cap_cry = aporte_crypto.iloc[-1]

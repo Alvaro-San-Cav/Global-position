@@ -73,10 +73,10 @@ function downloadTaxCsv(gains: Record<string, unknown>[]): void {
 }
 
 export function Tax() {
-  const { data, isLoading } = useTax()
+  const { data, isLoading, isError, error, refetch } = useTax()
   const [year, setYear] = useState<string>(ALL_YEARS)
 
-  const gains = data?.gains ?? []
+  const gains = useMemo(() => data?.gains ?? [], [data])
   const annual = data?.annual ?? []
   const byTicker = data?.by_ticker ?? []
 
@@ -112,6 +112,29 @@ export function Tax() {
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-3/4" />
           </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (isError) {
+    return (
+      <div>
+        <PageHeader
+          title="Fiscalidad"
+          subtitle="Plusvalías y minusvalías por criterio FIFO."
+        />
+        <div
+          role="alert"
+          className="rounded-[var(--radius-card-lg)] border border-border-subtle bg-card p-8 text-center text-sm"
+        >
+          <p className="text-red">No se pudo calcular la fiscalidad.</p>
+          {error instanceof Error && error.message && (
+            <p className="mt-1 text-xs text-txt2">{error.message}</p>
+          )}
+          <Button variant="outline" className="mt-4" onClick={() => void refetch()}>
+            Reintentar
+          </Button>
         </div>
       </div>
     )

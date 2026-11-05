@@ -91,7 +91,10 @@ def generate_full_report(
         #  CHART 1 – Stock evolution   (top-left)
         # ══════════════════════════════════════════════════════════════
         ax1 = fig.add_axes([0.07, 0.7, 0.42, 0.25])
-        fecha_inicio = pd.to_datetime('2020-01-01')
+        # Left limit = first data point (no hardcoded year, B8).
+        _starts = [x.dropna().index.min() for x in (valor_total_cartera, aporte_diario)
+                   if x is not None and not x.dropna().empty]
+        fecha_inicio = min(_starts) if _starts else None
         ax1.plot(valor_total_cartera, label='Valor de la cartera',
                  color='#2E86AB', linewidth=2)
         ax1.plot(aporte_diario, label='Capital aportado neto',
@@ -113,7 +116,8 @@ def generate_full_report(
         ax1.set_ylabel('€', fontsize=9)
         ax1.legend(fontsize=7, loc='upper left')
         ax1.grid(True, alpha=0.3)
-        ax1.set_xlim(left=fecha_inicio)
+        if fecha_inicio is not None:
+            ax1.set_xlim(left=fecha_inicio)
         ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
         for lab in ax1.get_xticklabels():
@@ -134,35 +138,40 @@ def generate_full_report(
                     valor_por_activo[coin] = valor_crypto_eur.loc[ultima_fecha, coin]
 
         valor_por_activo = valor_por_activo[valor_por_activo > 0]
-        total = valor_por_activo.sum()
-        pcts = valor_por_activo / total * 100
+        if valor_por_activo.empty or valor_por_activo.sum() <= 0:
+            ax2.text(0.5, 0.5, 'Sin posiciones valoradas', ha='center',
+                     va='center', fontsize=11, color='grey')
+            ax2.axis('off')
+        else:
+            total = valor_por_activo.sum()
+            pcts = valor_por_activo / total * 100
 
-        grandes = valor_por_activo[pcts >= 2]
-        pequenos = valor_por_activo[pcts < 2]
-        if not pequenos.empty:
-            grandes['Otros'] = pequenos.sum()
-        grandes = grandes.sort_values(ascending=False)
+            grandes = valor_por_activo[pcts >= 2]
+            pequenos = valor_por_activo[pcts < 2]
+            if not pequenos.empty:
+                grandes['Otros'] = pequenos.sum()
+            grandes = grandes.sort_values(ascending=False)
 
-        def _autopct(pct):
-            return f'{pct:.1f}%' if pct >= 1 else ''
+            def _autopct(pct):
+                return f'{pct:.1f}%' if pct >= 1 else ''
 
-        pie_colors = [
-            '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-            '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
-            '#aec7e8', '#ffbb78', '#98df8a', '#ff9896',
-        ]
+            pie_colors = [
+                '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+                '#aec7e8', '#ffbb78', '#98df8a', '#ff9896',
+            ]
 
-        wedges, texts, autotexts = ax2.pie(
-            grandes, labels=grandes.index, autopct=_autopct,
-            startangle=140,
-            colors=pie_colors[:len(grandes)],
-            textprops={'fontsize': 7},
-            wedgeprops={'linewidth': 1.0, 'edgecolor': '#d9d9d9'},
-        )
-        for at in autotexts:
-            at.set_fontweight('bold'); at.set_fontsize(7)
-        ax2.set_title(f'Composición total cartera\n({ultima_fecha.date()})',
-                       fontsize=12, fontweight='bold', fontfamily='sans-serif')
+            wedges, texts, autotexts = ax2.pie(
+                grandes, labels=grandes.index, autopct=_autopct,
+                startangle=140,
+                colors=pie_colors[:len(grandes)],
+                textprops={'fontsize': 7},
+                wedgeprops={'linewidth': 1.0, 'edgecolor': '#d9d9d9'},
+            )
+            for at in autotexts:
+                at.set_fontweight('bold'); at.set_fontsize(7)
+            ax2.set_title(f'Composición total cartera\n({ultima_fecha.date()})',
+                           fontsize=12, fontweight='bold', fontfamily='sans-serif')
 
         # ══════════════════════════════════════════════════════════════
         #  CHART 3 – Crypto evolution  (middle)

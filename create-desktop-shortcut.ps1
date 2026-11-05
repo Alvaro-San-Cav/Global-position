@@ -13,10 +13,12 @@ $lnkPath = Join-Path $desktop 'Global Position.lnk'
 
 $icon = Join-Path $root 'frontend\public\app-icon.ico'
 
+# wscript (GUI) evita el parpadeo de consola que produce powershell.exe
+# lanzado directamente desde un .lnk, incluso con -WindowStyle Hidden.
 $shell = New-Object -ComObject WScript.Shell
 $lnk = $shell.CreateShortcut($lnkPath)
-$lnk.TargetPath       = 'powershell.exe'
-$lnk.Arguments        = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$root\launch-app.ps1`""
+$lnk.TargetPath       = "$env:SystemRoot\System32\wscript.exe"
+$lnk.Arguments        = "`"$root\launch-app.vbs`""
 $lnk.WorkingDirectory = $root
 $lnk.Description      = 'Global Position — cartera de inversión'
 if (Test-Path $icon) { $lnk.IconLocation = "$icon,0" }

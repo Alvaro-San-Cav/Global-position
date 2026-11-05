@@ -1,32 +1,36 @@
-# React + TypeScript + Vite
+# Global Position - Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+SPA React 19 + Vite + TypeScript + Tailwind v4 (componentes shadcn/Radix,
+TanStack Query, Recharts). Consume la API FastAPI de `../backend`.
 
-Currently, two official plugins are available:
+## Requisitos
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Node 20+ y pnpm (`corepack enable`). Instala dependencias con `pnpm install`.
 
-## React Compiler
+## Scripts
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+| Comando | Acción |
+|---------|--------|
+| `pnpm dev` | Vite en `:5173` con proxy `/api` hacia `:8000` (necesita el backend levantado) |
+| `pnpm build` | `tsc -b` + build de producción en `dist/` (lo sirve FastAPI) |
+| `pnpm preview` | Sirve el build localmente |
+| `pnpm test` | Vitest en modo watch (`pnpm test run` para una sola pasada) |
+| `pnpm lint` | Oxlint |
+| `pnpm format` | Prettier sobre `src/` |
+| `pnpm gen:api` | Regenera `src/api/schema.d.ts` desde `http://localhost:8000/api/openapi.json` (backend levantado) |
 
-## Expanding the Oxlint configuration
+## Estructura
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```
+src/
+  api/          client.ts, queries.ts (hooks TanStack Query), types.ts, schema.d.ts (generado)
+  components/   ui/ (shadcn), charts/, dashboard/, operations/, layout/
+  pages/        Dashboard, Operations, Crypto, Tax, Objetivo, Import, Settings
+  lib/          format.ts (es-ES), utils.ts, derivedTiles.ts
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Notas
+
+- Tras cambiar endpoints o modelos Pydantic del backend, ejecuta `pnpm gen:api`.
+- `dist/` y `node_modules/` están en `.gitignore`.
+- Ver el [README principal](../README.md) para el flujo completo y el lanzador de escritorio.

@@ -1,8 +1,8 @@
-pandas
-numpy
-yfinance
-matplotlib
-seaborn
-fastapi
-uvicorn[standard]
-python-multipart
+pandas~=2.3.3
+numpy~=2.4.2
+yfinance~=1.2.0
+matplotlib~=3.10.8
+seaborn~=0.13.2
+fastapi~=0.136.0
+uvicorn[standard]~=0.44.0
+python-multipart~=0.0.26

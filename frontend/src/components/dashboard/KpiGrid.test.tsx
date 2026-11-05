@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
-import { KpiGrid } from './KpiGrid'
+import { KpiGrid, InfoDot } from './KpiGrid'
 import type { Metrics } from '@/api/types'
 
 const base: Metrics = {
@@ -35,5 +35,19 @@ describe('KpiGrid', () => {
       />,
     )
     expect(screen.getByText(/vs MSCI World/)).toBeInTheDocument()
+  })
+})
+
+describe('InfoDot', () => {
+  it('is a focusable button described by its tooltip', () => {
+    render(<InfoDot text="Explicacion" />)
+    const btn = screen.getByRole('button', { name: 'Más información' })
+    expect(btn).toHaveAttribute('type', 'button')
+    const tip = screen.getByRole('tooltip', { hidden: true })
+    expect(btn.getAttribute('aria-describedby')).toBe(tip.id)
+    expect(tip).toHaveTextContent('Explicacion')
+    expect(tip.className).toContain('group-focus-within:opacity-100')
+    btn.focus()
+    expect(btn).toHaveFocus()
   })
 })

@@ -74,6 +74,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/crypto/{row_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Api Crypto Put */
+        put: operations["api_crypto_put_api_crypto__row_id__put"];
+        post?: never;
+        /** Api Crypto Delete */
+        delete: operations["api_crypto_delete_api_crypto__row_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tax": {
         parameters: {
             query?: never;
@@ -183,6 +201,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/source-file/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Source File Get
+         * @description Return the raw CSV (columns + string cells) of a configured source file.
+         */
+        get: operations["api_source_file_get_api_source_file__filename__get"];
+        /**
+         * Api Source File Put
+         * @description Overwrite a configured source file with edited rows (with backup).
+         */
+        put: operations["api_source_file_put_api_source_file__filename__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pending-files/{filename}": {
         parameters: {
             query?: never;
@@ -259,6 +301,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/target": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Target Get
+         * @description Return the stored target ("cartera tipo") + diversification rules.
+         */
+        get: operations["api_target_get_api_target_get"];
+        put?: never;
+        /**
+         * Api Target Post
+         * @description Persist the target config; invalidate the dashboard cache.
+         */
+        post: operations["api_target_post_api_target_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rebalance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Rebalance
+         * @description Control panel: what to do to hit the target vs current holdings (cartera+cash).
+         *
+         *     Reuses the dashboard computation (net worth + class breakdown incl. cash),
+         *     so it reflects the exact same figures shown on the Dashboard.
+         */
+        get: operations["api_rebalance_api_rebalance_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/process/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Process Preview
+         * @description Detect what /api/process WOULD add, without saving or deleting anything.
+         *     Powers the confirmation preview shown before committing new transactions.
+         */
+        post: operations["api_process_preview_api_process_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/process": {
         parameters: {
             query?: never;
@@ -273,6 +383,28 @@ export interface paths {
          * @description Ingest pending CSVs from input/ into processing/ (mirrors CLI opts 2 & 3).
          */
         post: operations["api_process_api_process_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/process/commit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Process Commit
+         * @description Persist the (possibly edited) rows the user confirmed in the preview,
+         *     then delete the source files from input/. Unlike /api/process this saves
+         *     exactly what the client sends — supporting edit/delete before saving.
+         */
+        post: operations["api_process_commit_api_process_commit_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -390,6 +522,19 @@ export interface components {
             /** Files */
             files: string[];
         };
+        /** CashBuffer */
+        CashBuffer: {
+            /**
+             * Pct
+             * @default 0
+             */
+            pct: number;
+            /**
+             * Amount
+             * @default 0
+             */
+            amount: number;
+        };
         /** CashEntry */
         CashEntry: {
             /** Currency */
@@ -412,6 +557,13 @@ export interface components {
             balances: {
                 [key: string]: number;
             };
+        };
+        /** ClassLimit */
+        ClassLimit: {
+            /** Min */
+            min?: number | null;
+            /** Max */
+            max?: number | null;
         };
         /** ClassSlice */
         ClassSlice: {
@@ -477,6 +629,10 @@ export interface components {
         };
         /** CryptoOperation */
         CryptoOperation: {
+            /** Id */
+            id?: number | null;
+            /** Fingerprint (hand-added; regenerate with pnpm gen:api once backend exposes it) */
+            fingerprint?: string | null;
             /** Date */
             Date: string;
             /** Product */
@@ -688,6 +844,79 @@ export interface components {
             /** Benchmark */
             benchmark?: components["schemas"]["XY"][] | null;
         };
+        /** PreviewFile */
+        PreviewFile: {
+            /** File */
+            file: string;
+            /** Kind */
+            kind: string;
+            /** Source */
+            source?: string | null;
+            /**
+             * Rows Read
+             * @default 0
+             */
+            rows_read: number;
+            /**
+             * New
+             * @default 0
+             */
+            new: number;
+            /**
+             * Duplicates
+             * @default 0
+             */
+            duplicates: number;
+            /**
+             * Entries
+             * @default []
+             */
+            entries: {
+                [key: string]: unknown;
+            }[];
+            /** Error */
+            error?: string | null;
+        };
+        /** ProcessCommit */
+        ProcessCommit: {
+            /**
+             * Files
+             * @default []
+             */
+            files: components["schemas"]["ProcessCommitFile"][];
+        };
+        /** ProcessCommitFile */
+        ProcessCommitFile: {
+            /** File */
+            file: string;
+            /** Kind */
+            kind: string;
+            /**
+             * Entries
+             * @default []
+             */
+            entries: {
+                [key: string]: unknown;
+            }[];
+        };
+        /** ProcessPreview */
+        ProcessPreview: {
+            /**
+             * Files
+             * @default []
+             */
+            files: components["schemas"]["PreviewFile"][];
+            /**
+             * Total New
+             * @default 0
+             */
+            total_new: number;
+            /**
+             * Total Duplicates
+             * @default 0
+             */
+            total_duplicates: number;
+        };
         /** ProcessResult */
         ProcessResult: {
             /** Ok */
@@ -712,6 +941,64 @@ export interface components {
              * @default
              */
             message: string;
+        };
+        /** RebalanceResponse */
+        RebalanceResponse: {
+            /** Configured */
+            configured: boolean;
+            /** Net Worth */
+            net_worth: number;
+            /** Target Sum Pct */
+            target_sum_pct: number;
+            /** Band Pct */
+            band_pct: number;
+            /** Rows */
+            rows: components["schemas"]["RebalanceRow"][];
+            /** Violations */
+            violations: components["schemas"]["RebalanceViolation"][];
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
+        /** RebalanceRow */
+        RebalanceRow: {
+            /** Asset Class */
+            asset_class: string;
+            /** Has Target */
+            has_target: boolean;
+            /** Target Pct */
+            target_pct: number | null;
+            /** Target Eur */
+            target_eur: number | null;
+            /** Actual Pct */
+            actual_pct: number;
+            /** Actual Eur */
+            actual_eur: number;
+            /** Drift Pct */
+            drift_pct: number | null;
+            /** Band Pct */
+            band_pct: number;
+            /** Within Band */
+            within_band: boolean;
+            /** Action Eur */
+            action_eur: number | null;
+            /** Status */
+            status: string;
+        };
+        /** RebalanceViolation */
+        RebalanceViolation: {
+            /** Kind */
+            kind: string;
+            /** Target */
+            target: string;
+            /** Message */
+            message: string;
+            /** Actual Pct */
+            actual_pct: number;
+            /** Limit Pct */
+            limit_pct: number;
         };
         /** ReportResult */
         ReportResult: {
@@ -760,6 +1047,15 @@ export interface components {
             /** Value */
             value: number;
         };
+        /** SourceFileContent */
+        SourceFileContent: {
+            /** File */
+            file: string;
+            /** Columns */
+            columns: string[];
+            /** Rows */
+            rows: string[][];
+        };
         /** SourceFileInfo */
         SourceFileInfo: {
             /** File */
@@ -768,6 +1064,40 @@ export interface components {
             source: string;
             /** Enabled */
             enabled: boolean;
+        };
+        /**
+         * TargetConfig
+         * @description Target ("cartera tipo") + diversification rules stored in sources.json.
+         */
+        TargetConfig: {
+            /**
+             * Targets
+             * @default {}
+             */
+            targets: {
+                [key: string]: number;
+            };
+            /**
+             * Band Pct
+             * @default 0
+             */
+            band_pct: number;
+            /** Max Asset Pct */
+            max_asset_pct?: number | null;
+            /**
+             * Class Limits
+             * @default {}
+             */
+            class_limits: {
+                [key: string]: components["schemas"]["ClassLimit"];
+            };
+            /**
+             * @default {
+             *       "pct": 0,
+             *       "amount": 0
+             *     }
+             */
+            cash_buffer: components["schemas"]["CashBuffer"];
         };
         /** TaxResponse */
         TaxResponse: {
@@ -975,6 +1305,72 @@ export interface operations {
             };
         };
     };
+    api_crypto_put_api_crypto__row_id__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                row_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CryptoOperationCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MutationResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_crypto_delete_api_crypto__row_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                row_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MutationResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     api_tax_api_tax_get: {
         parameters: {
             query?: never;
@@ -1128,6 +1524,72 @@ export interface operations {
             };
         };
     };
+    api_source_file_get_api_source_file__filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceFileContent"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_source_file_put_api_source_file__filename__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceFileContent"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceFileContent"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     api_delete_pending_api_pending_files__filename__delete: {
         parameters: {
             query?: never;
@@ -1252,6 +1714,99 @@ export interface operations {
             };
         };
     };
+    api_target_get_api_target_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TargetConfig"];
+                };
+            };
+        };
+    };
+    api_target_post_api_target_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TargetConfig"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TargetConfig"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_rebalance_api_rebalance_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RebalanceResponse"];
+                };
+            };
+        };
+    };
+    api_process_preview_api_process_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessPreview"];
+                };
+            };
+        };
+    };
     api_process_api_process_post: {
         parameters: {
             query?: never;
@@ -1268,6 +1823,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProcessResult"];
+                };
+            };
+        };
+    };
+    api_process_commit_api_process_commit_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProcessCommit"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProcessResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

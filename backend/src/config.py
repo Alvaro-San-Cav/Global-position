@@ -9,6 +9,54 @@ in sources.json at the repo root – edit that file to add your own.
 import json
 import logging
 import os
+import tempfile
+import threading
+
+# ── Concurrency / atomic IO ──────────────────────────────────────────────
+# DATA_LOCK serialises load+save cycles of operaciones.csv / crypto.csv / cash.json.
+# SOURCES_LOCK serialises writes to sources.json (shared by POST /api/sources and
+# save_target_portfolio).
+DATA_LOCK = threading.RLock()
+SOURCES_LOCK = threading.Lock()
+
+
+def atomic_write_text(path: str, text: str, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` atomically (temp file in same dir + os.replace)."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_json(path: str, data, indent: int = 4) -> None:
+    atomic_write_text(path, json.dumps(data, indent=indent, ensure_ascii=False))
+
+
+def atomic_to_csv(df, path: str, **kwargs) -> None:
+    """DataFrame.to_csv written atomically (tmp + os.replace)."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp")
+    os.close(fd)
+    try:
+        df.to_csv(tmp, **kwargs)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
 
 # ── Paths ────────────────────────────────────────────────────────────────
 # Repo root: backend/src/config.py → three levels up.
@@ -107,12 +155,18 @@ def get_target_portfolio() -> dict:
     return raw
 
 
+def save_sources(data: dict) -> None:
+    """Atomically replace sources.json (serialised with SOURCES_LOCK)."""
+    with SOURCES_LOCK:
+        atomic_write_json(SOURCES_FILE, data, indent=4)
+
+
 def save_target_portfolio(cfg: dict) -> None:
     """Persist the target_portfolio section, preserving the rest of sources.json."""
-    data = load_sources()
-    data["target_portfolio"] = cfg
-    with open(SOURCES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    with SOURCES_LOCK:
+        data = load_sources()
+        data["target_portfolio"] = cfg
+        atomic_write_json(SOURCES_FILE, data, indent=4)
 
 
 def get_zero_value_flow_from_est_tickers() -> list[str]:

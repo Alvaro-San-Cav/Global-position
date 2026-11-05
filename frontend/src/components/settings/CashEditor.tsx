@@ -5,48 +5,66 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useCash, useSaveCash } from '@/api/queries'
-import { fmtEur, parseAmount } from '@/lib/format'
-
-interface Row {
-  currency: string
-  amount: string
-}
+import { fmtEur } from '@/lib/format'
+import {
+  fmtAmountInput,
+  removesCurrency,
+  validateCashRows,
+  type CashRow,
+  type CashRowError,
+} from './cashRows'
 
 export function CashEditor() {
   const { data, isLoading, isError } = useCash()
   const save = useSaveCash()
-  const [rows, setRows] = useState<Row[]>([])
+  const [rows, setRows] = useState<CashRow[]>([])
+  const [errors, setErrors] = useState<Record<number, CashRowError>>({})
+
+  const existing = new Set((data?.balances ?? []).map((b) => b.currency.toUpperCase()))
 
   useEffect(() => {
     if (!data) return
+    setErrors({})
     setRows(
       data.balances.length
-        ? data.balances.map((b) => ({ currency: b.currency, amount: String(b.amount) }))
+        ? data.balances.map((b) => ({ currency: b.currency, amount: fmtAmountInput(b.amount) }))
         : [{ currency: 'EUR', amount: '' }],
     )
   }, [data])
 
-  function update(i: number, patch: Partial<Row>) {
+  function update(i: number, patch: Partial<CashRow>) {
     setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
+    setErrors((prev) => {
+      if (!prev[i]) return prev
+      const next = { ...prev }
+      delete next[i]
+      return next
+    })
   }
   function addRow() {
     setRows((prev) => [...prev, { currency: '', amount: '' }])
   }
   function removeRow(i: number) {
     setRows((prev) => prev.filter((_, idx) => idx !== i))
+    setErrors({})
   }
 
   async function persist() {
-    const balances: Record<string, number> = {}
-    for (const r of rows) {
-      const cur = r.currency.trim().toUpperCase()
-      const amt = parseAmount(r.amount)
-      if (cur && !Number.isNaN(amt) && amt !== 0) balances[cur] = amt
+    const { balances, errors: errs, removed } = validateCashRows(rows, existing)
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs)
+      toast.error('Revisa los importes marcados', {
+        description: 'Hay filas con divisa o importe no válidos; no se ha guardado nada.',
+      })
+      return
     }
+    setErrors({})
     try {
       await save.mutateAsync(balances)
       toast.success('Efectivo guardado', {
-        description: 'Aparece como clase «Efectivo» en el dashboard.',
+        description: removed.length
+          ? `Eliminada(s) por importe 0: ${removed.join(', ')}`
+          : 'Aparece como clase «Efectivo» en el dashboard.',
       })
     } catch (e) {
       toast.error('No se pudo guardar', {
@@ -73,25 +91,49 @@ export function CashEditor() {
           <span />
         </div>
         {rows.map((r, i) => (
-          <div key={i} className="grid grid-cols-[1fr_1.4fr_auto] items-center gap-2">
-            <Input
-              value={r.currency}
-              placeholder="EUR"
-              onChange={(e) => update(i, { currency: e.target.value.toUpperCase() })}
-            />
-            <Input
-              type="text"
-              inputMode="decimal"
-              value={r.amount}
-              placeholder="0,00"
-              onChange={(e) => update(i, { amount: e.target.value })}
-            />
-            <Button variant="ghost" size="icon" onClick={() => removeRow(i)} aria-label="Eliminar">
-              <Trash2 />
-            </Button>
+          <div key={i}>
+            <div className="grid grid-cols-[1fr_1.4fr_auto] items-center gap-2">
+              <Input
+                value={r.currency}
+                placeholder="EUR"
+                aria-label={`Divisa ${i + 1}`}
+                aria-invalid={errors[i]?.currency ? true : undefined}
+                className={errors[i]?.currency ? 'border-red' : undefined}
+                onChange={(e) => update(i, { currency: e.target.value.toUpperCase() })}
+              />
+              <Input
+                type="text"
+                inputMode="decimal"
+                value={r.amount}
+                placeholder="0,00"
+                aria-label={`Importe ${i + 1}`}
+                aria-invalid={errors[i]?.amount ? true : undefined}
+                className={errors[i]?.amount ? 'border-red' : undefined}
+                onChange={(e) => update(i, { amount: e.target.value })}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => removeRow(i)}
+                aria-label="Eliminar"
+              >
+                <Trash2 />
+              </Button>
+            </div>
+            {(errors[i]?.currency || errors[i]?.amount) && (
+              <p role="alert" className="mt-1 text-xs text-red">
+                {errors[i]?.currency ?? errors[i]?.amount}
+              </p>
+            )}
+            {!errors[i] && removesCurrency(r, existing) && (
+              <p className="mt-1 text-xs text-amber">
+                Importe 0: esta divisa se eliminará al guardar.
+              </p>
+            )}
           </div>
         ))}
-        <Button variant="subtle" size="sm" onClick={addRow}>
+        <Button type="button" variant="subtle" size="sm" onClick={addRow}>
           <Plus /> Añadir divisa
         </Button>
       </div>
@@ -102,7 +144,7 @@ export function CashEditor() {
       </div>
 
       <div className="flex items-center gap-3">
-        <Button onClick={persist} disabled={save.isPending}>
+        <Button type="button" onClick={persist} disabled={save.isPending}>
           <Save /> Guardar efectivo
         </Button>
       </div>

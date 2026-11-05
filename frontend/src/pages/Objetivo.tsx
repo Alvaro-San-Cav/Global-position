@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, Trash2, Target, AlertTriangle, Save } from 'lucide-react'
 import { toast } from 'sonner'
 import { PageHeader } from '@/components/PageHeader'
@@ -7,13 +7,20 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   useAssetClasses,
   useRebalance,
   useSaveTarget,
   useTarget,
 } from '@/api/queries'
 import type { TargetConfig } from '@/api/types'
-import { fmtEur, fmtPct, parseAmount } from '@/lib/format'
+import { fmtEur, fmtPct, parsePercent } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 interface ClassRow {
@@ -26,7 +33,7 @@ interface ClassRow {
 function num(s: string): number | null {
   const t = s.trim()
   if (t === '') return null
-  const v = parseAmount(t)
+  const v = parsePercent(t)
   return Number.isNaN(v) ? null : v
 }
 
@@ -42,9 +49,18 @@ export function Objetivo() {
   const [cashPct, setCashPct] = useState('')
   const [cashAmount, setCashAmount] = useState('')
 
-  // Seed the form from server state once it arrives.
+  // Seed once from server state; never overwrite what the user is typing.
+  // Re-seed only when the server copy changed after our own save (updatedAt).
+  const seeded = useRef(false)
+  const reseedAfterSave = useRef(false)
   useEffect(() => {
     if (!target) return
+    if (seeded.current && !reseedAfterSave.current) return
+    const hasStored =
+      Object.keys(target.targets ?? {}).length + Object.keys(target.class_limits ?? {}).length > 0
+    if (!hasStored && !assetClasses) return // wait for known classes to seed empty form
+    seeded.current = true
+    reseedAfterSave.current = false
     const names = new Set<string>([
       ...Object.keys(target.targets ?? {}),
       ...Object.keys(target.class_limits ?? {}),
@@ -71,6 +87,13 @@ export function Objetivo() {
     [rows],
   )
 
+  // Every class the backend knows about, plus any legacy name already stored in
+  // the config so an existing row never loses its own value from the dropdown.
+  const classOptions = useMemo(() => {
+    const known = assetClasses?.known_classes ?? []
+    return [...new Set([...known, ...rows.map((r) => r.name).filter(Boolean)])]
+  }, [assetClasses?.known_classes, rows])
+
   function updateRow(i: number, patch: Partial<ClassRow>) {
     setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
   }
@@ -96,8 +119,8 @@ export function Objetivo() {
     }
     try {
       await save.mutateAsync(body)
+      reseedAfterSave.current = true
       toast.success('Cartera objetivo guardada')
-      rebalance.refetch()
     } catch (e) {
       toast.error('No se pudo guardar', {
         description: e instanceof Error ? e.message : String(e),
@@ -105,7 +128,10 @@ export function Objetivo() {
     }
   }
 
-  const sumOk = Math.abs(sumPct - 100) < 0.01
+  // Targets don't have to add up to 100 — untargeted classes absorb the rest.
+  // Only overshooting 100 is impossible.
+  const sumOk = sumPct <= 100.01
+  const untargeted = 100 - sumPct
 
   return (
     <div>
@@ -129,12 +155,14 @@ export function Objetivo() {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              {/* Header padding mirrors the controls' px-3 and the w-9 delete
+                  button so every label sits over its own column. */}
               <div className="mb-2 grid grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr_auto] items-center gap-2 text-[11px] font-medium uppercase text-txt3">
-                <span>Clase</span>
-                <span className="text-right">Objetivo %</span>
-                <span className="text-right">Mín %</span>
-                <span className="text-right">Máx %</span>
-                <span />
+                <span className="pl-3">Clase</span>
+                <span className="pr-3 text-right">Objetivo %</span>
+                <span className="pr-3 text-right">Mín %</span>
+                <span className="pr-3 text-right">Máx %</span>
+                <span className="w-9" />
               </div>
               <div className="space-y-2">
                 {rows.map((r, i) => (
@@ -142,11 +170,28 @@ export function Objetivo() {
                     key={i}
                     className="grid grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr_auto] items-center gap-2"
                   >
-                    <Input
-                      value={r.name}
-                      placeholder="Acciones"
-                      onChange={(e) => updateRow(i, { name: e.target.value })}
-                    />
+                    <Select
+                      value={r.name || undefined}
+                      onValueChange={(v) => updateRow(i, { name: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Elegir clase…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {classOptions
+                          // Hide classes already taken by another row.
+                          .filter(
+                            (c) =>
+                              c === r.name ||
+                              !rows.some((o, oi) => oi !== i && o.name === c),
+                          )
+                          .map((c) => (
+                            <SelectItem key={c} value={c}>
+                              {c}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
                     <Input
                       className="text-right"
                       inputMode="decimal"
@@ -184,6 +229,10 @@ export function Objetivo() {
                 <Button
                   variant="subtle"
                   size="sm"
+                  disabled={
+                    rows.some((r) => !r.name) ||
+                    classOptions.every((c) => rows.some((r) => r.name === c))
+                  }
                   onClick={() => setRows((prev) => [...prev, { name: '', pct: '', min: '', max: '' }])}
                 >
                   <Plus /> Añadir clase
@@ -197,6 +246,11 @@ export function Objetivo() {
                   Suma: {fmtPct(sumPct, 1)}
                 </span>
               </div>
+              {sumPct > 0 && untargeted > 0.01 && (
+                <p className="mt-2 text-[11px] text-txt3">
+                  El resto ({fmtPct(untargeted, 1)}) queda sin objetivo.
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -279,6 +333,7 @@ function Field({
 function statusBadge(status: string) {
   if (status === 'comprar') return <Badge variant="green">Comprar</Badge>
   if (status === 'vender') return <Badge variant="red">Vender</Badge>
+  if (status === 'sin_objetivo') return <Badge variant="default">Sin objetivo</Badge>
   return <Badge variant="default">OK</Badge>
 }
 
@@ -339,7 +394,7 @@ function ControlPanel({
                     <tr key={r.asset_class} className="border-b border-border-subtle/50">
                       <td className="py-2 text-txt">{r.asset_class}</td>
                       <td className="py-2 text-right tabular-nums text-txt2">
-                        {fmtPct(r.target_pct, 1)}
+                        {r.has_target ? fmtPct(r.target_pct ?? 0, 1) : '—'}
                       </td>
                       <td className="py-2 text-right tabular-nums text-txt2">
                         {fmtPct(r.actual_pct, 1)}
@@ -347,25 +402,30 @@ function ControlPanel({
                       <td
                         className={cn(
                           'py-2 text-right tabular-nums',
-                          r.within_band ? 'text-txt3' : r.drift_pct > 0 ? 'text-red' : 'text-amber',
+                          r.within_band
+                            ? 'text-txt3'
+                            : (r.drift_pct ?? 0) > 0
+                              ? 'text-red'
+                              : 'text-amber',
                         )}
                       >
-                        {r.drift_pct > 0 ? '+' : ''}
-                        {fmtPct(r.drift_pct, 1)}
+                        {r.has_target
+                          ? `${(r.drift_pct ?? 0) > 0 ? '+' : ''}${fmtPct(r.drift_pct ?? 0, 1)}`
+                          : '—'}
                       </td>
                       <td
                         className={cn(
                           'py-2 text-right tabular-nums font-medium',
-                          r.status === 'ok'
+                          !r.has_target || r.status === 'ok'
                             ? 'text-txt3'
-                            : r.action_eur > 0
+                            : (r.action_eur ?? 0) > 0
                               ? 'text-green'
                               : 'text-red',
                         )}
                       >
-                        {r.status === 'ok'
+                        {!r.has_target || r.status === 'ok'
                           ? '—'
-                          : `${r.action_eur > 0 ? '+' : ''}${fmtEur(r.action_eur)}`}
+                          : `${(r.action_eur ?? 0) > 0 ? '+' : ''}${fmtEur(r.action_eur ?? 0)}`}
                       </td>
                       <td className="py-2 text-right">{statusBadge(r.status)}</td>
                     </tr>

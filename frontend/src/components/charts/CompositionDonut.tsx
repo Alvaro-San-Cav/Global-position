@@ -38,7 +38,6 @@ export function CompositionDonut({
     [composition, totalValue],
   )
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const renderTooltip = ({ active, payload }: any) => {
     if (!active || !payload?.length) return null
     const row = payload[0].payload as AssetSlice | undefined

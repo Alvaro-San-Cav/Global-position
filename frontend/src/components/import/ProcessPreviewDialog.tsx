@@ -20,6 +20,7 @@ import {
   TableHead,
   TableCell,
 } from '@/components/ui/table'
+import { parseAmount } from '@/lib/format'
 import type {
   ProcessPreview,
   PreviewFile,
@@ -57,6 +58,23 @@ const CRYPTO_COLS: { key: string; label: string }[] = [
 
 function str(v: unknown): string {
   return v === null || v === undefined ? '' : String(v)
+}
+
+const NUMERIC_KEYS = ['quantity', 'price', 'value']
+
+/** Keys of a row whose numeric value is invalid (NaN, or empty/0 crypto quantity). */
+function invalidKeys(kind: 'stock' | 'crypto', row: Record<string, string>): string[] {
+  const bad: string[] = []
+  if (kind === 'crypto') {
+    const q = parseAmount(row.quantity ?? '')
+    if (Number.isNaN(q) || q === 0) bad.push('quantity')
+    return bad
+  }
+  for (const k of NUMERIC_KEYS) {
+    const raw = (row[k] ?? '').trim()
+    if (raw !== '' && Number.isNaN(parseAmount(raw))) bad.push(k)
+  }
+  return bad
 }
 
 function toEditFiles(preview: ProcessPreview | null): EditFile[] {
@@ -103,6 +121,11 @@ export function ProcessPreviewDialog({
   const totalNew = files.reduce((a, f) => a + f.rows.length, 0)
   const totalDup = files.reduce((a, f) => a + f.duplicates, 0)
   const nothingNew = totalNew === 0
+  const invalidCount = files.reduce(
+    (a, f) =>
+      f.error ? a : a + f.rows.filter((r) => invalidKeys(f.kind, r).length > 0).length,
+    0,
+  )
 
   function setCell(fi: number, ri: number, key: string, value: string) {
     setFiles((prev) =>
@@ -136,6 +159,8 @@ export function ProcessPreviewDialog({
   }
 
   function handleConfirm() {
+    if (invalidCount > 0) return
+    const num = (v: string) => (v.trim() === '' ? null : parseAmount(v))
     const payload: ProcessCommitFile[] = files
       .filter((f) => !f.error && f.rows.length > 0)
       .map((f) => ({
@@ -146,17 +171,17 @@ export function ProcessPreviewDialog({
             ? ({
                 date: r.date,
                 coin: r.coin,
-                quantity: Number(r.quantity) || 0,
+                quantity: parseAmount(r.quantity),
                 ticker: r.ticker,
               } as PreviewCryptoEntry)
             : ({
                 date: r.date,
                 product: r.product,
                 isin: r.isin,
-                quantity: r.quantity === '' ? null : Number(r.quantity),
-                price: r.price === '' ? null : Number(r.price),
+                quantity: num(r.quantity),
+                price: num(r.price),
                 coin: r.coin,
-                value: r.value === '' ? null : Number(r.value),
+                value: num(r.value),
               } as PreviewStockEntry),
         ),
       }))
@@ -201,12 +226,17 @@ export function ProcessPreviewDialog({
         </div>
 
         <DialogFooter>
+          {invalidCount > 0 && (
+            <p role="alert" className="mr-auto text-xs text-red">
+              Hay {invalidCount} fila(s) con valores numéricos no válidos.
+            </p>
+          )}
           <DialogClose asChild>
             <Button variant="outline" size="sm" disabled={busy}>
               Cancelar
             </Button>
           </DialogClose>
-          <Button size="sm" disabled={busy || nothingNew} onClick={handleConfirm}>
+          <Button size="sm" disabled={busy || nothingNew || invalidCount > 0} onClick={handleConfirm}>
             {busy ? 'Guardando…' : `Confirmar y guardar (${totalNew})`}
           </Button>
         </DialogFooter>
@@ -265,14 +295,18 @@ function FileEditor({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {file.rows.map((row, ri) => (
+                  {file.rows.map((row, ri) => {
+                    const invalid = invalidKeys(file.kind, row)
+                    return (
                     <TableRow key={ri}>
                       {cols.map((c) => (
                         <TableCell key={c.key} className="p-1">
                           <Input
                             value={row[c.key] ?? ''}
+                            aria-label={`${c.label} fila ${ri + 1}`}
+                            aria-invalid={invalid.includes(c.key) || undefined}
                             onChange={(e) => onCell(ri, c.key, e.target.value)}
-                            className="h-8 text-xs tabular-nums"
+                            className={`h-8 text-xs tabular-nums ${invalid.includes(c.key) ? 'border-red' : ''}`}
                           />
                         </TableCell>
                       ))}
@@ -288,7 +322,8 @@ function FileEditor({
                         </button>
                       </TableCell>
                     </TableRow>
-                  ))}
+                    )
+                  })}
                 </TableBody>
               </Table>
             </div>

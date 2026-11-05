@@ -59,7 +59,7 @@ def test_fetch_prices_backfills_new_ticker_from_start_date(tmp_path, monkeypatch
     assert result.index.min() == start_date
 
     assert any(req == ("SAP.DE",) and dl_start == start_date for req, dl_start in calls)
-    assert any(req == ("AAPL",) and dl_start == last_cached + pd.Timedelta(days=1) for req, dl_start in calls)
+    assert any(req == ("AAPL",) and dl_start == last_cached - pd.Timedelta(days=3) for req, dl_start in calls)  # 3-day overlap (M5)
 
 
 def test_price_adjustments_applied_on_full_cache_hit(tmp_path, monkeypatch):

@@ -78,11 +78,17 @@ export interface CashEntry {
   currency: string
   amount: number
   eur: number
+  /** FX rate could not be fetched; `eur` is an approximation (optional, server may add). */
+  fx_warning?: boolean | string | null
 }
 
 export interface CashResponse {
   balances: CashEntry[]
   total_eur: number
+  /** Currencies without an FX rate: their `eur` is NOT converted. */
+  missing_fx?: string[]
+  /** Human-readable FX warning from the backend. */
+  warning?: string | null
 }
 
 export interface CorrelationAsset {
@@ -119,6 +125,8 @@ export interface CryptoChart {
 }
 
 export interface DashboardResponse {
+  /** Cash currencies lacking an FX rate (not converted to EUR). */
+  cash_missing_fx?: string[] | null
   error?: string | null
   metrics?: Metrics | null
   has_crypto?: boolean | null
@@ -160,6 +168,9 @@ export interface OperationCreate {
 }
 
 export interface CryptoOperation {
+  id?: number | null
+  /** Stable row hash (optional); forwarded as ?fingerprint= on update/delete. */
+  fingerprint?: string | null
   Date: string
   Product?: string | null
   Coin?: string | null
@@ -176,10 +187,13 @@ export interface CryptoOperationCreate {
   ticker?: string
 }
 
+/** Rows are dynamic (pandas). Known optional flag: `sin_historial` (sale without purchase history). */
+export type TaxRow = Record<string, unknown> & { sin_historial?: boolean }
+
 export interface TaxResponse {
-  gains: Record<string, unknown>[]
-  annual: Record<string, unknown>[]
-  by_ticker: Record<string, unknown>[]
+  gains: TaxRow[]
+  annual: TaxRow[]
+  by_ticker: TaxRow[]
 }
 
 export interface SourceFileInfo {
@@ -296,15 +310,17 @@ export interface TargetConfig {
 
 export interface RebalanceRow {
   asset_class: string
-  target_pct: number
-  target_eur: number
+  /** false → class is held but has no target set; it is unconstrained, not 0%. */
+  has_target: boolean
+  target_pct: number | null
+  target_eur: number | null
   actual_pct: number
   actual_eur: number
-  drift_pct: number
+  drift_pct: number | null
   band_pct: number
   within_band: boolean
-  action_eur: number
-  status: 'ok' | 'comprar' | 'vender'
+  action_eur: number | null
+  status: 'ok' | 'comprar' | 'vender' | 'sin_objetivo'
 }
 
 export interface RebalanceViolation {

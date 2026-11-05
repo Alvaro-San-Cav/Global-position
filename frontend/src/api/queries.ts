@@ -2,6 +2,7 @@ import {
   useQuery,
   useMutation,
   useQueryClient,
+  type QueryClient,
   type UseQueryOptions,
 } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut, apiDelete, apiUpload } from './client'
@@ -39,6 +40,31 @@ export const qk = {
   sourceData: ['source-data'] as const,
   target: ['target'] as const,
   rebalance: ['rebalance'] as const,
+}
+
+/**
+ * Invalidate every query derived from portfolio data (operations, crypto,
+ * cash, sources, process...). Call after ANY mutation that may change them.
+ * Pass `{ dashboard: false }` when the dashboard cache was already set.
+ */
+export function invalidatePortfolio(
+  qc: QueryClient,
+  opts: { dashboard?: boolean } = {},
+) {
+  const keys = [
+    qk.rebalance,
+    qk.tax,
+    qk.operations,
+    qk.crypto,
+    qk.cash,
+    qk.sourceData,
+    ...(opts.dashboard === false ? [] : [qk.dashboard]),
+  ]
+  for (const queryKey of keys) qc.invalidateQueries({ queryKey })
+}
+
+export function fingerprintQuery(fp: string | null | undefined): string {
+  return fp ? `?fingerprint=${encodeURIComponent(fp)}` : ''
 }
 
 // ── Queries ────────────────────────────────────────────────────────────
@@ -102,10 +128,7 @@ export function useSaveCash() {
   return useMutation({
     mutationFn: (balances: Record<string, number>) =>
       apiPost<CashResponse>('/api/cash', { balances }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.cash })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
-    },
+    onSuccess: () => invalidatePortfolio(qc),
   })
 }
 
@@ -151,8 +174,8 @@ export function useSaveSourceFile() {
       ),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['source-file', data.file] })
-      qc.invalidateQueries({ queryKey: qk.sourceData })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
+      qc.invalidateQueries({ queryKey: qk.sourceFiles })
+      invalidatePortfolio(qc)
     },
   })
 }
@@ -181,6 +204,7 @@ export function useSaveTarget() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.target })
       qc.invalidateQueries({ queryKey: qk.rebalance })
+      qc.invalidateQueries({ queryKey: qk.sources })
     },
   })
 }
@@ -192,10 +216,7 @@ export function useAddOperation() {
   return useMutation({
     mutationFn: (body: OperationCreate) =>
       apiPost<{ ok: boolean; row: Operation }>('/api/operations', body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.operations })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
-    },
+    onSuccess: () => invalidatePortfolio(qc),
   })
 }
 
@@ -204,10 +225,41 @@ export function useAddCrypto() {
   return useMutation({
     mutationFn: (body: CryptoOperationCreate) =>
       apiPost<{ ok: boolean; row: CryptoOperation }>('/api/crypto', body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.crypto })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
+    onSuccess: () => invalidatePortfolio(qc),
+  })
+}
+
+export function useUpdateCrypto() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      id,
+      body,
+      fingerprint,
+    }: {
+      id: number
+      body: CryptoOperationCreate
+      fingerprint?: string | null
+    }) =>
+      apiPut<{ ok: boolean; row: CryptoOperation }>(
+        `/api/crypto/${id}${fingerprintQuery(fingerprint)}`,
+        body,
+      ),
+    onSuccess: () => invalidatePortfolio(qc),
+  })
+}
+
+export function useDeleteCrypto() {
+  const qc = useQueryClient()
+  return useMutation({
+    // Accepts a bare id (legacy) or { id, fingerprint }.
+    mutationFn: (arg: number | { id: number; fingerprint?: string | null }) => {
+      const { id, fingerprint } = typeof arg === 'number' ? { id: arg, fingerprint: null } : arg
+      return apiDelete<{ ok: boolean; row: CryptoOperation }>(
+        `/api/crypto/${id}${fingerprintQuery(fingerprint)}`,
+      )
     },
+    onSuccess: () => invalidatePortfolio(qc),
   })
 }
 
@@ -217,8 +269,9 @@ export function useSaveSources() {
     mutationFn: (body: SourcesConfig) => apiPost<{ ok: boolean }>('/api/sources', body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.sources })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
       qc.invalidateQueries({ queryKey: qk.assetClasses })
+      qc.invalidateQueries({ queryKey: qk.target })
+      invalidatePortfolio(qc)
     },
   })
 }
@@ -259,9 +312,8 @@ export function useProcess() {
     mutationFn: () => apiPost<ProcessResult>('/api/process'),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.pending })
-      qc.invalidateQueries({ queryKey: qk.operations })
-      qc.invalidateQueries({ queryKey: qk.crypto })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
+      qc.invalidateQueries({ queryKey: qk.sourceFiles })
+      invalidatePortfolio(qc)
     },
   })
 }
@@ -274,10 +326,8 @@ export function useProcessCommit() {
       apiPost<ProcessResult>('/api/process/commit', body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.pending })
-      qc.invalidateQueries({ queryKey: qk.sourceData })
-      qc.invalidateQueries({ queryKey: qk.operations })
-      qc.invalidateQueries({ queryKey: qk.crypto })
-      qc.invalidateQueries({ queryKey: qk.dashboard })
+      qc.invalidateQueries({ queryKey: qk.sourceFiles })
+      invalidatePortfolio(qc)
     },
   })
 }
@@ -289,6 +339,7 @@ export function useRefreshDashboard() {
     mutationFn: () => apiGet<DashboardResponse>('/api/dashboard?refresh=true'),
     onSuccess: (data) => {
       qc.setQueryData(qk.dashboard, data)
+      invalidatePortfolio(qc, { dashboard: false })
     },
   })
 }

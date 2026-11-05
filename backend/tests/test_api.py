@@ -15,7 +15,16 @@ from fastapi.testclient import TestClient
 import server
 from src.api_models import Operation, SourceFileInfo
 
+import pytest
+
 client = TestClient(server.app)
+
+
+@pytest.fixture(autouse=True)
+def _isolate(isolated_data):
+    """Every test in this module runs against a temp data dir, never real data."""
+    server._invalidate_dashboard()
+    yield
 
 
 def test_health():

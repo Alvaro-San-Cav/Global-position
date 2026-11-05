@@ -22,9 +22,12 @@ $env:PYTHONIOENCODING = 'utf-8'
 switch ($cmd) {
     'dev' {
         # Backend in a separate window; frontend (vite) in this one.
+        # La ruta viaja como variable de entorno del hijo: no se interpola dentro
+        # del comando, asi que apostrofos/espacios en la ruta no lo rompen.
+        $env:GP_BACKEND_DIR = "$root\backend"
         Start-Process powershell -ArgumentList @(
             '-NoExit', '-Command',
-            "`$env:PYTHONIOENCODING='utf-8'; Set-Location '$root\backend'; python -m uvicorn server:app --reload --port 8000"
+            "`$env:PYTHONIOENCODING='utf-8'; Set-Location -LiteralPath `$env:GP_BACKEND_DIR; python -m uvicorn server:app --reload --host 127.0.0.1 --port 8000"
         )
         Push-Location "$root\frontend"
         try { pnpm dev } finally { Pop-Location }

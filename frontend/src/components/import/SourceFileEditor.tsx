@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Plus, Trash2, Loader2 } from 'lucide-react'
 import {
@@ -52,13 +52,20 @@ export function SourceFileEditor({
   const [columns, setColumns] = useState<string[]>([])
   const [rows, setRows] = useState<string[][]>([])
 
-  // Reset local edit state whenever a freshly-loaded file arrives.
+  // Load edit state only when a file is opened (or the file changes), never on
+  // background refetches, so unsaved edits are not overwritten.
+  const loadedFor = useRef<string | null>(null)
   useEffect(() => {
-    if (query.data) {
+    if (!filename) {
+      loadedFor.current = null
+      return
+    }
+    if (query.data && loadedFor.current !== filename) {
+      loadedFor.current = filename
       setColumns(query.data.columns)
       setRows(query.data.rows.map((r) => [...r]))
     }
-  }, [query.data])
+  }, [query.data, filename])
 
   function setCell(ri: number, ci: number, value: string) {
     setRows((prev) => {

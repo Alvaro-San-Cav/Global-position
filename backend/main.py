@@ -20,11 +20,34 @@ import pandas as pd
 from src import config, loaders, market_data, core, reporter, tax
 
 
+class AnalysisError(RuntimeError):
+    """Raised by run_analysis when the analysis cannot be completed.
+
+    Callers (CLI menu, server) decide how to surface it; it is no longer
+    swallowed with a print + bare return.
+    """
+
+
+def _ensure_utf8_stdout() -> None:
+    """Avoid UnicodeEncodeError when printing emojis to a cp1252 console/pipe."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
+
 # ─────────────────────────────────────────────────────────────────────────
 #  1. Run full analysis
 # ─────────────────────────────────────────────────────────────────────────
 
-def run_analysis():
+def run_analysis(interactive: bool = False):
+    """Run the full analysis and generate the PDF.
+
+    Raises AnalysisError on any failure (instead of printing and returning).
+    ``interactive=True`` lets ticker resolution prompt on stdin (CLI only).
+    """
+    _ensure_utf8_stdout()
     print("\n🚀 Starting Global Position Analysis...\n")
 
     # ── Validate sources.json config ─────────────────────────────────
@@ -32,7 +55,7 @@ def run_analysis():
         config.validate_sources()
     except ValueError as e:
         print(f"❌ Error en sources.json: {e}")
-        return
+        raise AnalysisError(f"Error en sources.json: {e}") from e
 
     # ── Load stock operations ────────────────────────────────────────
     try:
@@ -40,25 +63,25 @@ def run_analysis():
         print(f"✅ Operations loaded: {len(df_ops)} records.")
     except Exception as e:
         print(f"❌ Error loading operations: {e}")
-        return
+        raise AnalysisError(f"Error loading operations: {e}") from e
 
     if df_ops.empty:
         print("⚠️  No operations found in processing/operaciones.csv")
-        return
+        raise AnalysisError("No operations found in processing/operaciones.csv")
 
     # ── Merge custom stock sources (from sources.json) ───────────────
     df_ops = loaders.merge_custom_stock_sources(df_ops)
 
     # ── Resolve tickers ──────────────────────────────────────────────
     try:
-        df_ops = market_data.update_tickers_in_operations(df_ops)
+        df_ops = market_data.update_tickers_in_operations(df_ops, interactive=interactive)
         tickers = [t for t in df_ops['ticker'].dropna().unique()
                    if t and str(t).strip()]
         currencies = df_ops['Coin'].dropna().unique().tolist()
         print(f"ℹ️  Unique tickers: {len(tickers)}")
     except Exception as e:
         print(f"❌ Error resolving tickers: {e}")
-        return
+        raise AnalysisError(f"Error resolving tickers: {e}") from e
 
     # ── Crypto data ──────────────────────────────────────────────────
     df_crypto = loaders.load_crypto_operations()
@@ -71,6 +94,11 @@ def run_analysis():
     # ── Market data ──────────────────────────────────────────────────
     try:
         start_date = df_ops['Date'].min()
+        if has_crypto:
+            # Crypto history may predate the first stock operation (M3).
+            crypto_start = pd.to_datetime(df_crypto['Date'], errors='coerce').min()
+            if pd.notna(crypto_start):
+                start_date = min(pd.Timestamp(start_date), pd.Timestamp(crypto_start))
         print("\n📥 Fetching historical prices...")
         prices = market_data.fetch_prices(tickers, start_date)
 
@@ -79,7 +107,7 @@ def run_analysis():
                                                crypto_coins=crypto_coins or None)
     except Exception as e:
         print(f"❌ Error fetching market data: {e}")
-        return
+        raise AnalysisError(f"Error fetching market data: {e}") from e
 
     # ── Identify and Exclude Failed Assets ───────────────────────────
     df_failed_ops = pd.DataFrame()
@@ -121,7 +149,7 @@ def run_analysis():
         df_adj = core.SplitManager.apply_splits(df_ops)
     except Exception as e:
         print(f"❌ Error applying splits: {e}")
-        return
+        raise AnalysisError(f"Error applying splits: {e}") from e
 
     # ── Stock portfolio ──────────────────────────────────────────────
     try:
@@ -130,11 +158,13 @@ def run_analysis():
 
         if valor_total_cartera.empty:
             print("⚠️  Portfolio value is empty – check data availability.")
-            return
+            raise AnalysisError("Portfolio value is empty - check data availability.")
+    except AnalysisError:
+        raise
     except Exception as e:
         print(f"❌ Error calculating stock portfolio: {e}")
         import traceback; traceback.print_exc()
-        return
+        raise AnalysisError(f"Error calculating stock portfolio: {e}") from e
 
     # ── Crypto portfolio ─────────────────────────────────────────────
     valor_total_crypto = aporte_crypto = valor_crypto_eur = None
@@ -194,6 +224,7 @@ def run_analysis():
     except Exception as e:
         print(f"❌ Error generating PDF: {e}")
         import traceback; traceback.print_exc()
+        raise AnalysisError(f"Error generating PDF: {e}") from e
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -201,13 +232,14 @@ def run_analysis():
 # ─────────────────────────────────────────────────────────────────────────
 
 def process_transactions():
+    _ensure_utf8_stdout()
     print("\n🔎 Checking input/ for new transactions...\n")
     try:
         df_ops = loaders.load_operations()
         df_updated = loaders.process_new_transactions(df_ops)
 
         print("🔍 Resolving tickers...")
-        df_updated = market_data.update_tickers_in_operations(df_updated)
+        df_updated = market_data.update_tickers_in_operations(df_updated, interactive=True)
 
         loaders.save_operations(df_updated)
         print("✅ Transaction processing complete.")
@@ -220,6 +252,7 @@ def process_transactions():
 # ─────────────────────────────────────────────────────────────────────────
 
 def process_crypto():
+    _ensure_utf8_stdout()
     print("\n🪙 Checking input/ for crypto exports...\n")
     try:
         df = loaders.process_crypto_transactions()
@@ -239,7 +272,8 @@ def process_crypto():
 #  5. Tax report (FIFO gains/losses)
 # ─────────────────────────────────────────────────────────────────────────
 
-def run_tax_report():
+def run_tax_report(interactive: bool = False):
+    _ensure_utf8_stdout()
     print("\n💶 Calculando plusvalías fiscales (FIFO)...\n")
     try:
         config.validate_sources()
@@ -253,7 +287,7 @@ def run_tax_report():
         return
 
     df_ops = loaders.merge_custom_stock_sources(df_ops)
-    df_ops = market_data.update_tickers_in_operations(df_ops)
+    df_ops = market_data.update_tickers_in_operations(df_ops, interactive=interactive)
 
     tickers = [t for t in df_ops['ticker'].dropna().unique() if t and str(t).strip()]
     currencies = df_ops['Coin'].dropna().unique().tolist()
@@ -357,6 +391,7 @@ def _print_summary(m: dict, has_crypto: bool):
 # ─────────────────────────────────────────────────────────────────────────
 
 def main():
+    _ensure_utf8_stdout()
     while True:
         print("\n=== GLOBAL POSITION MANAGER ===")
         print("1. 📊 Run Analysis & Generate Report")
@@ -368,13 +403,16 @@ def main():
         choice = input("Select an option: ").strip()
 
         if choice == "1":
-            run_analysis()
+            try:
+                run_analysis(interactive=True)
+            except AnalysisError as e:
+                print(f"Analysis failed: {e}")
         elif choice == "2":
             process_transactions()
         elif choice == "3":
             process_crypto()
         elif choice == "4":
-            run_tax_report()
+            run_tax_report(interactive=True)
         elif choice == "5":
             print("Bye!")
             sys.exit()

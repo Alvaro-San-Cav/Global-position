@@ -1,3 +1,5 @@
+> **Documento histórico: migración completada.** Se conserva como registro del plan original; el estado actual está en [README.md](README.md).
+
 # Plan de implementación paso a paso — Migración frontend Global-Position
 
 > **Documento ejecutable.** Destinado a ser implementado por un agente (Opus 4.8) sin contexto previo.

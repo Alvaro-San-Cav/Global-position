@@ -67,7 +67,7 @@ export function Crypto() {
     return map
   }, [dashboard.data])
 
-  const columns: ColumnDef<CryptoOperation>[] = [
+  const columns = useMemo<ColumnDef<CryptoOperation>[]>(() => [
     {
       key: 'Date',
       header: 'Fecha',
@@ -107,7 +107,18 @@ export function Crypto() {
       sortValue: (r) => r.ticker ?? '',
       render: (r) => r.ticker || '—',
     },
-  ]
+    {
+      key: 'actions',
+      header: '',
+      align: 'right',
+      render: (r) =>
+        r.id != null ? (
+          <div className="flex justify-end">
+            <CryptoDialog operation={r} />
+          </div>
+        ) : null,
+    },
+  ], [])
 
   return (
     <div>

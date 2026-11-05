@@ -9,7 +9,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { parseISO } from 'date-fns'
+import { parseISO, subYears } from 'date-fns'
 import type { PortfolioChart as PortfolioChartData } from '@/api/types'
 import { fmtEur, fmtDate } from '@/lib/format'
 
@@ -80,8 +80,7 @@ export function PortfolioChart({
     const cfg = RANGES.find((r) => r.key === range)
     if (!cfg?.years || rows.length === 0) return rows
     const last = parseISO(rows[rows.length - 1].x)
-    const cutoff = new Date(last)
-    cutoff.setFullYear(cutoff.getFullYear() - cfg.years)
+    const cutoff = subYears(last, cfg.years)
     return rows.filter((r) => parseISO(r.x) >= cutoff)
   }, [rows, range])
 
@@ -91,6 +90,8 @@ export function PortfolioChart({
         {RANGES.map((r) => (
           <button
             key={r.key}
+            type="button"
+            aria-pressed={range === r.key}
             onClick={() => setRange(r.key)}
             className={`rounded-[var(--radius-card)] px-2.5 py-1 text-xs font-medium transition-colors ${
               range === r.key

@@ -141,23 +141,23 @@ export function Settings() {
     void persist(parsed)
   }
 
+  if (isError && !draft) {
+    return (
+      <div>
+        <PageHeader title="Ajustes" subtitle="Configuración de fuentes y cálculos." />
+        <div className="rounded-[var(--radius-card-lg)] border border-border-subtle bg-card p-8 text-sm text-red">
+          No se pudo cargar la configuración.
+        </div>
+      </div>
+    )
+  }
+
   if (isLoading || !draft) {
     return (
       <div>
         <PageHeader title="Ajustes" subtitle="Configuración de fuentes y cálculos." />
         <div className="rounded-[var(--radius-card-lg)] border border-border-subtle bg-card p-8 text-sm text-txt2">
           Cargando configuración…
-        </div>
-      </div>
-    )
-  }
-
-  if (isError) {
-    return (
-      <div>
-        <PageHeader title="Ajustes" subtitle="Configuración de fuentes y cálculos." />
-        <div className="rounded-[var(--radius-card-lg)] border border-border-subtle bg-card p-8 text-sm text-red">
-          No se pudo cargar la configuración.
         </div>
       </div>
     )

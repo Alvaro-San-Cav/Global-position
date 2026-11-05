@@ -12,7 +12,11 @@ Everything is normalised and deduplicated before saving.
 """
 
 import fnmatch
+import hashlib
+import json
+import math
 import os
+import re
 import shutil
 from datetime import date, datetime, timedelta
 
@@ -50,17 +54,87 @@ def _prune_backups(stem: str) -> None:
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────
 
-def clean_eu_float(x) -> float:
-    """European number format (1.234,56) → float 1234.56."""
-    if pd.isna(x) or str(x).strip() == "":
-        return 0.0
-    s = str(x).replace('"', '').replace(' ', '')
-    if ',' in s:
-        s = s.replace('.', '').replace(',', '.')
+_NUM_STRIP_RE = re.compile(r"[^0-9.,\-+]")
+
+
+def _parse_number(x) -> float | None:
+    """Parse a number in EU/US/plain format. Returns None if empty/unparseable.
+
+    Rules:
+      * currency symbols/letters, spaces (incl. NBSP) and quotes are ignored;
+      * "(1.234,56)", "1.234,56-" and "-1.234,56" are negative;
+      * when both '.' and ',' appear, the LAST one is the decimal separator
+        ("1,234.56" -> 1234.56, "1.234,56" -> 1234.56);
+      * a separator repeated several times is a thousands separator
+        ("1.234.567" -> 1234567);
+      * AMBIGUOUS case, a single separator and nothing else ("1.234" or
+        "1,234"): the separator is treated as the DECIMAL point (historical
+        convention of this app: "1,5" -> 1.5, "1.234" -> 1.234).
+    """
+    if x is None or isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        f = float(x)
+        return f if math.isfinite(f) else None
+    s = str(x).strip()
+    if s == "" or s.lower() in ("nan", "none", "null"):
+        return None
+    neg = s.startswith("(") and s.endswith(")")
+    s = _NUM_STRIP_RE.sub("", s)
+    if "-" in s:
+        neg = True
+    s = s.replace("-", "").replace("+", "")
+    if not s:
+        return None
+    has_dot, has_comma = "." in s, "," in s
+    if has_dot and has_comma:
+        dec = "." if s.rfind(".") > s.rfind(",") else ","
+        thou = "," if dec == "." else "."
+        if s.count(dec) > 1:
+            return None
+        s = s.replace(thou, "").replace(dec, ".")
+    elif has_comma or has_dot:
+        sep = "," if has_comma else "."
+        if s.count(sep) > 1:
+            s = s.replace(sep, "")
+        else:
+            s = s.replace(sep, ".")
     try:
-        return float(s)
+        v = float(s)
     except ValueError:
+        return None
+    if not math.isfinite(v):
+        return None
+    return -v if neg else v
+
+
+def clean_eu_float(x) -> float:
+    """Parse EU ("1.234,56"), US ("1,234.56") or plain ("1234.56") numbers.
+
+    Returns 0.0 for empty/NaN input. For non-empty text that cannot be parsed
+    it also returns 0.0 but logs a warning. See `_parse_number` for the rules
+    (single-separator ambiguity "1.234" is read as decimal 1.234).
+    """
+    try:
+        if x is None or (not isinstance(x, str) and pd.isna(x)):
+            return 0.0
+    except (TypeError, ValueError):
+        pass
+    if isinstance(x, str) and x.strip().lower() in ("", "nan", "none", "null"):
         return 0.0
+    v = _parse_number(x)
+    if v is None:
+        config.get_logger().warning(f"clean_eu_float: no se pudo interpretar {x!r}; se usa 0.0")
+        return 0.0
+    return v
+
+
+def _coerce_number_series(s: pd.Series) -> pd.Series:
+    """Series -> float with NaN for empty/unparseable values (never raises)."""
+    def _one(v):
+        n = _parse_number(v)
+        return float("nan") if n is None else n
+    return s.map(_one).astype(float)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -164,14 +238,13 @@ def _parse_degiro_file(filepath: str) -> pd.DataFrame | None:
 
     df_f = df_new[want].copy()
     df_f['Date'] = pd.to_datetime(df_f['Date'], dayfirst=True, errors='coerce')
-    for col in ['Price', 'Value']:
-        df_f[col] = (
-            df_f[col].astype(str)
-            .str.replace('"', '', regex=False)
-            .str.replace(',', '.', regex=False)
-            .astype(float)
-        )
-    df_f['Quantity'] = pd.to_numeric(df_f['Quantity'], errors='coerce')
+    for col in ['Price', 'Value', 'Quantity']:
+        raw_col = df_f[col]
+        df_f[col] = _coerce_number_series(raw_col)
+        bad = int((df_f[col].isna() & raw_col.notna()
+                   & (raw_col.astype(str).str.strip() != "")).sum())
+        if bad:
+            log.warning(f"_parse_degiro_file: {fname}: {bad} valores no numéricos en '{col}' (NaN)")
     return df_f
 
 
@@ -229,7 +302,9 @@ def preview_new_transactions(df_ops: pd.DataFrame) -> list[dict]:
                 "entries": entries,
             })
         except Exception as e:
-            result.append({"file": fname, "kind": "stock", "error": str(e), "entries": []})
+            config.get_logger().error(f"preview_new_transactions: {fname}: {e}")
+            result.append({"file": fname, "kind": "stock",
+                           "error": "No se pudo leer el archivo (ver ingesta.log).", "entries": []})
     return result
 
 
@@ -278,7 +353,14 @@ def process_new_transactions(df_ops: pd.DataFrame) -> pd.DataFrame:
             log.error(f"process_new_transactions: error en {fname}: {e}")
 
     if new_rows:
-        df_ops = pd.concat([df_ops, pd.DataFrame(new_rows)], ignore_index=True)
+        # Drop all-NA columns of the new frame (e.g. ticker) and skip empty frames
+        # so pd.concat does not emit its dtype-inference FutureWarning.
+        df_new_rows = pd.DataFrame(new_rows).dropna(axis=1, how='all')
+        if df_ops.empty:
+            extra = [c for c in df_new_rows.columns if c not in df_ops.columns]
+            df_ops = df_new_rows.reindex(columns=[*df_ops.columns, *extra])
+        else:
+            df_ops = pd.concat([df_ops, df_new_rows], ignore_index=True)
         df_ops = df_ops.sort_values('Date', kind='mergesort')
         print(f"🟢 {len(new_rows)} new transaction(s) added.")
         log.info(f"process_new_transactions: total {len(new_rows)} transacciones nuevas añadidas")
@@ -293,11 +375,13 @@ def save_operations(df_ops: pd.DataFrame) -> None:
     """Persist the operations DF to processing/operaciones.csv."""
     log = config.get_logger()
     os.makedirs(config.PROCESSING_DIR, exist_ok=True)
-    _backup_file(config.OPERATIONS_FILE)
+    with config.DATA_LOCK:
+        _backup_file(config.OPERATIONS_FILE)
     df_export = df_ops.loc[:, ~df_ops.columns.duplicated()].copy()
     df_export['eur'] = 'EUR'
     cols = [c for c in config.OPERATIONS_COLS if c in df_export.columns]
-    df_export[cols].to_csv(config.OPERATIONS_FILE, index=False)
+    with config.DATA_LOCK:
+        config.atomic_to_csv(df_export[cols], config.OPERATIONS_FILE, index=False)
     log.info(f"save_operations: {len(df_export)} filas guardadas → {config.OPERATIONS_FILE}")
     print(f"💾 Operations saved → {config.OPERATIONS_FILE}")
 
@@ -458,9 +542,63 @@ def save_crypto_operations(df_crypto: pd.DataFrame) -> None:
             df_export[col] = None
 
     df_export = df_export[cols].sort_values('Date', kind='mergesort')
-    df_export.to_csv(config.CRYPTO_DB, index=False)
+    with config.DATA_LOCK:
+        config.atomic_to_csv(df_export, config.CRYPTO_DB, index=False)
     log.info(f"save_crypto_operations: {len(df_export)} filas guardadas → {config.CRYPTO_DB}")
     print(f"💾 Crypto operations saved → {config.CRYPTO_DB}")
+
+
+def crypto_fingerprint(date, coin, quantity, ticker) -> str:
+    """Stable content hash of a crypto row (Date+Coin+Quantity+ticker).
+
+    Unlike the positional `id`, it survives re-sorting / other rows being
+    added or removed, so PUT/DELETE can detect that the row they target moved.
+    """
+    ts = pd.to_datetime(date, errors="coerce")
+    d = ts.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(ts) else str(date)
+    try:
+        q = f"{float(quantity):.10g}"
+    except (TypeError, ValueError):
+        q = str(quantity)
+    raw = f"{d}|{str(coin).strip().upper()}|{q}|{str(ticker or '').strip()}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def crypto_dedup_key(date, coin, quantity) -> str:
+    ts = pd.to_datetime(date, errors="coerce")
+    d = ts.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(ts) else str(date)
+    try:
+        q = f"{float(quantity):.10g}"
+    except (TypeError, ValueError):
+        q = str(quantity)
+    return f"{d}|{str(coin).strip().upper()}|{q}"
+
+
+def _tombstone_file() -> str:
+    return os.path.join(config.PROCESSING_DIR, "crypto_deleted.json")
+
+
+def load_crypto_tombstones() -> set[str]:
+    """Keys (Date|Coin|Quantity) of exchange rows the user deleted/edited by hand.
+    process_crypto_transactions skips them so they are not resurrected from the
+    permanent exchange export on the next ingestion."""
+    path = _tombstone_file()
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return set(map(str, json.load(f)))
+    except Exception as e:
+        config.get_logger().warning(f"crypto_deleted.json ilegible: {e}")
+        return set()
+
+
+def update_crypto_tombstones(add=(), remove=()) -> None:
+    with config.DATA_LOCK:
+        cur = load_crypto_tombstones()
+        new = (cur | set(add)) - set(remove)
+        if new != cur:
+            config.atomic_write_json(_tombstone_file(), sorted(new), indent=2)
 
 
 def _parse_crypto_rows(df_raw: pd.DataFrame, src: dict) -> list[dict]:
@@ -522,6 +660,7 @@ def preview_new_crypto_transactions() -> list[dict]:
         return result
 
     df_current = load_crypto_operations()
+    tomb = load_crypto_tombstones()
     existing = set()
     if len(df_current) > 0:
         existing = set(
@@ -545,7 +684,7 @@ def preview_new_crypto_transactions() -> list[dict]:
                 entries, n_dup = [], 0
                 for r in file_rows:
                     key = f"{r['Date']}_{r['Coin']}_{r['Quantity']}"
-                    if key in existing:
+                    if key in existing or crypto_dedup_key(r['Date'], r['Coin'], r['Quantity']) in tomb:
                         n_dup += 1
                         continue
                     entries.append({
@@ -561,8 +700,9 @@ def preview_new_crypto_transactions() -> list[dict]:
                     "entries": entries,
                 })
             except Exception as e:
+                config.get_logger().error(f"preview_new_crypto_transactions: {fname}: {e}")
                 result.append({"file": fname, "kind": "crypto", "source": name,
-                               "error": str(e), "entries": []})
+                               "error": "No se pudo leer el archivo (ver ingesta.log).", "entries": []})
     return result
 
 
@@ -636,6 +776,16 @@ def process_crypto_transactions() -> pd.DataFrame:
         return df_current
 
     df_new = pd.DataFrame(new_rows)
+    tomb = load_crypto_tombstones()
+    if tomb:
+        keep = [
+            crypto_dedup_key(r.Date, r.Coin, r.Quantity) not in tomb
+            for r in df_new.itertuples()
+        ]
+        df_new = df_new[keep].reset_index(drop=True)
+        if df_new.empty:
+            print("ℹ️  Only previously deleted crypto rows found. Nothing added.")
+            return df_current
 
     # Dedup against existing
     n_dup = 0

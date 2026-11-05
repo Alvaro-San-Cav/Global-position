@@ -1,5 +1,6 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { UploadCloud, Loader2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
 interface DropzoneProps {
@@ -17,7 +18,15 @@ export function Dropzone({ onFiles, busy = false }: DropzoneProps) {
 
   function pick(files: FileList | null) {
     if (!files || files.length === 0) return
-    onFiles(Array.from(files))
+    const all = Array.from(files)
+    const csv = all.filter((f) => f.name.toLowerCase().endsWith('.csv'))
+    const skipped = all.length - csv.length
+    if (skipped > 0) {
+      toast.warning(
+        `${skipped} archivo(s) ignorado(s): solo se admiten ficheros .csv`,
+      )
+    }
+    if (csv.length > 0) onFiles(csv)
   }
 
   function handleDrop(e: DragEvent<HTMLDivElement>) {
@@ -39,6 +48,7 @@ export function Dropzone({ onFiles, busy = false }: DropzoneProps) {
 
   return (
     <div
+      // oxlint-disable-next-line jsx-a11y/prefer-tag-over-role
       role="button"
       tabIndex={0}
       aria-disabled={busy}

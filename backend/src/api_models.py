@@ -6,7 +6,7 @@ renames). Field names with capital letters (Date, Product, ISIN…) are the
 canonical CSV schema and must not be changed to snake_case.
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class XY(BaseModel):
@@ -96,6 +96,10 @@ class CashEntry(BaseModel):
 class CashResponse(BaseModel):
     balances: list[CashEntry]
     total_eur: float
+    # Currencies with no FX rate available: their "eur" value assumes rate 1.0
+    # (i.e. is NOT converted). Empty when every currency has a rate.
+    missing_fx: list[str] = []
+    warning: str | None = None
 
 
 class CashUpdate(BaseModel):
@@ -124,15 +128,16 @@ class TargetConfig(BaseModel):
 
 class RebalanceRow(BaseModel):
     asset_class: str
-    target_pct: float
-    target_eur: float
+    has_target: bool           # False → class held but no target set (not an error)
+    target_pct: float | None
+    target_eur: float | None
     actual_pct: float
     actual_eur: float
-    drift_pct: float
+    drift_pct: float | None
     band_pct: float
     within_band: bool
-    action_eur: float          # +buy / -sell
-    status: str                # "ok" | "comprar" | "vender"
+    action_eur: float | None   # +buy / -sell; None when no target
+    status: str                # "ok" | "comprar" | "vender" | "sin_objetivo"
 
 
 class RebalanceViolation(BaseModel):
@@ -209,6 +214,8 @@ class DashboardResponse(BaseModel):
     crypto_breakdown: list[CryptoSlice] | None = None
     crypto_total_value: float | None = None
     failed_tickers: list[str] | None = None
+    # Cash currencies with no FX rate (their EUR value assumes 1.0, not converted).
+    cash_missing_fx: list[str] | None = None
 
 
 class Operation(BaseModel):
@@ -234,6 +241,10 @@ class OperationCreate(BaseModel):
 
 
 class CryptoOperation(BaseModel):
+    id: int | None = None
+    # Stable content hash (Date+Coin+Quantity+ticker). Optional: clients may send
+    # it back on PUT/DELETE (?fingerprint=...) to detect a stale positional id.
+    fingerprint: str | None = None
     Date: str
     Product: str | None = None
     Coin: str | None = None
@@ -243,11 +254,28 @@ class CryptoOperation(BaseModel):
 
 
 class CryptoOperationCreate(BaseModel):
-    Date: str
-    Coin: str
-    Quantity: float               # > 0
-    Product: str = ""
-    ticker: str = ""
+    Date: str = Field(max_length=40)
+    Coin: str = Field(max_length=32)
+    Quantity: float = Field(gt=0, allow_inf_nan=False)
+    Product: str = Field(default="", max_length=120)
+    ticker: str = Field(default="", max_length=40)
+    # Optional optimistic-concurrency token for PUT (same as ?fingerprint=).
+    fingerprint: str | None = Field(default=None, max_length=64)
+
+
+class SourceDef(BaseModel):
+    """One entry of stock_sources / crypto_sources in sources.json."""
+    name: str = Field(min_length=1, max_length=120)
+    file_pattern: str = Field(min_length=1, max_length=200)
+    column_map: dict[str, str]
+    model_config = {"extra": "allow"}
+
+
+class SourcesPayload(BaseModel):
+    """Body of POST /api/sources (whole sources.json document)."""
+    stock_sources: list[SourceDef] = []
+    crypto_sources: list[SourceDef] = []
+    model_config = {"extra": "allow"}
 
 
 class TaxResponse(BaseModel):

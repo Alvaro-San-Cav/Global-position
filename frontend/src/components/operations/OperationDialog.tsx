@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { cloneElement, useId, useState, type ReactElement, type ReactNode } from 'react'
 import { Plus } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -107,6 +107,7 @@ export function OperationDialog() {
         </DialogHeader>
 
         <form
+          id="operation-form"
           onSubmit={(e) => {
             e.preventDefault()
             void submit()
@@ -166,7 +167,15 @@ export function OperationDialog() {
               placeholder="Ej: 123.45"
             />
           </Field>
-          <Field label="Valor (€)" className="col-span-2">
+          <Field
+            label="Valor (€)"
+            className="col-span-2"
+            hint={
+              <p className="mt-1 text-xs text-txt3">
+                Se calcula como ±Cantidad×Precio si se deja vacío.
+              </p>
+            }
+          >
             <Input
               type="number"
               step="any"
@@ -174,9 +183,6 @@ export function OperationDialog() {
               onChange={(e) => set('Value', e.target.value)}
               placeholder="Auto si se deja vacío"
             />
-            <p className="mt-1 text-xs text-txt3">
-              Se calcula como ±Cantidad×Precio si se deja vacío.
-            </p>
           </Field>
         </form>
 
@@ -188,11 +194,7 @@ export function OperationDialog() {
           >
             Cancelar
           </Button>
-          <Button
-            type="button"
-            onClick={() => void submit()}
-            disabled={add.isPending}
-          >
+          <Button type="submit" form="operation-form" disabled={add.isPending}>
             {add.isPending ? 'Guardando…' : 'Guardar operación'}
           </Button>
         </DialogFooter>
@@ -205,15 +207,21 @@ function Field({
   label,
   children,
   className,
+  hint,
 }: {
   label: string
-  children: ReactNode
+  children: ReactElement<{ id?: string }>
   className?: string
+  hint?: ReactNode
 }) {
+  const id = useId()
   return (
     <div className={className}>
-      <Label className="mb-1 block">{label}</Label>
-      {children}
+      <Label htmlFor={id} className="mb-1 block">
+        {label}
+      </Label>
+      {cloneElement(children, { id })}
+      {hint}
     </div>
   )
 }

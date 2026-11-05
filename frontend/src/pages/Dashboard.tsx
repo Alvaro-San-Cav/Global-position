@@ -4,9 +4,11 @@ import { Link } from 'react-router-dom'
 import { PageHeader } from '@/components/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useCash, useDashboard } from '@/api/queries'
+import { useCash, useDashboard, useRebalance } from '@/api/queries'
 import { fmtDate, fmtEur } from '@/lib/format'
+import { computeDerivedTiles } from '@/lib/derivedTiles'
 import { KpiGrid } from '@/components/dashboard/KpiGrid'
+import { CapitalDelta } from '@/components/dashboard/CapitalDelta'
 import { ClassBreakdown } from '@/components/dashboard/ClassBreakdown'
 import { CryptoSection } from '@/components/dashboard/CryptoSection'
 import { DashboardToolbar } from '@/components/dashboard/DashboardToolbar'
@@ -54,6 +56,7 @@ function EmptyState({ message }: { message: string }) {
 export function Dashboard() {
   const { data, isLoading, isError, error } = useDashboard()
   const { data: cash } = useCash()
+  const { data: rebalance } = useRebalance()
 
   // Prefer the fast /api/cash figure so edits reflect instantly; net worth is
   // computed client-side (invested value + cash) without waiting for the
@@ -101,6 +104,12 @@ export function Dashboard() {
     )
   }, [data?.top_assets, cashTotal])
 
+  // Tiles derivadas configurables (ver lib/derivedTiles), p. ej. "Valor sin SAP".
+  const derivedTiles = useMemo(
+    () => computeDerivedTiles(data?.metrics, data?.composition_full, data?.class_breakdown),
+    [data?.metrics, data?.composition_full, data?.class_breakdown],
+  )
+
   const subtitle = data?.metrics?.fecha_actual
     ? `Análisis a ${fmtDate(data.metrics.fecha_actual)}`
     : 'Posición global de la cartera'
@@ -132,7 +141,9 @@ export function Dashboard() {
             </div>
           )}
 
-          <KpiGrid metrics={data.metrics} />
+          <KpiGrid metrics={data.metrics} derivedTiles={derivedTiles} />
+
+          {data.portfolio_chart && <CapitalDelta chart={data.portfolio_chart} />}
 
           {cashTotal > 0 && (
             <div className="flex flex-wrap items-center gap-x-10 gap-y-3 rounded-[var(--radius-card)] border border-accent2/40 bg-accent2/10 px-6 py-5">
@@ -174,7 +185,7 @@ export function Dashboard() {
                 <CardTitle>Desglose por clase de activo</CardTitle>
               </CardHeader>
               <CardContent>
-                <ClassBreakdown classes={classBreakdown} />
+                <ClassBreakdown classes={classBreakdown} rebalance={rebalance} />
               </CardContent>
             </Card>
           )}

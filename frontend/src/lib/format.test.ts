@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { fmtEur, fmtPct, fmtNum, fmtDate, signColor, parseAmount } from './format'
+import { fmtEur, fmtPct, fmtNum, fmtDate, signColor, parseAmount, parsePercent } from './format'
 
 describe('fmtEur', () => {
   it('formats euros in es-ES', () => {
-    // Thousands separator is optional: jsdom's ICU may omit grouping.
     expect(fmtEur(1234.5)).toContain('€')
-    expect(fmtEur(1234.5)).toMatch(/1\.?234,50/)
+    expect(fmtEur(1234.5)).toMatch(/1\.234,50/)
+    expect(fmtEur(1234567.891)).toMatch(/1\.234\.567,89/)
   })
   it('handles null/undefined/NaN', () => {
     expect(fmtEur(null)).toBe('—')
@@ -29,7 +29,8 @@ describe('fmtPct', () => {
 
 describe('fmtNum', () => {
   it('formats without currency', () => {
-    expect(fmtNum(1000)).toMatch(/1\.?000/)
+    expect(fmtNum(1000)).toBe('1.000')
+    expect(fmtPct(1234.5, 1)).toBe('1.234,5 %')
     expect(fmtNum(null)).toBe('—')
   })
 })
@@ -53,6 +54,7 @@ describe('signColor', () => {
     expect(signColor(0)).toBe('text-green')
     expect(signColor(-1)).toBe('text-red')
     expect(signColor(null)).toBe('text-txt2')
+    expect(signColor(NaN)).toBe('text-txt2')
   })
 })
 
@@ -80,5 +82,26 @@ describe('parseAmount', () => {
   it('returns NaN for empty/garbage', () => {
     expect(Number.isNaN(parseAmount(''))).toBe(true)
     expect(Number.isNaN(parseAmount(null))).toBe(true)
+  })
+})
+
+describe('parsePercent', () => {
+  it('accepts comma or dot decimal', () => {
+    expect(parsePercent('12,5')).toBe(12.5)
+    expect(parsePercent('12.5')).toBe(12.5)
+    expect(parsePercent('7')).toBe(7)
+    expect(parsePercent(' 5 % ')).toBe(5)
+    expect(parsePercent('-2,5')).toBe(-2.5)
+  })
+  it('never treats the dot as thousands', () => {
+    expect(parsePercent('2.500')).toBe(2.5)
+    expect(parsePercent('1.000')).toBe(1)
+  })
+  it('returns NaN for garbage', () => {
+    expect(Number.isNaN(parsePercent(''))).toBe(true)
+    expect(Number.isNaN(parsePercent('abc'))).toBe(true)
+    expect(Number.isNaN(parsePercent('1,2,3'))).toBe(true)
+    expect(Number.isNaN(parsePercent('1.2.3'))).toBe(true)
+    expect(Number.isNaN(parsePercent(null))).toBe(true)
   })
 })

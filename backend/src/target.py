@@ -27,6 +27,40 @@ def _num(v, default: float = 0.0) -> float:
         return default
 
 
+def _is_blank(v) -> bool:
+    return v is None or str(v).strip() in ("", "None", "null")
+
+
+def _parse_pct(v, label: str, warnings: list[str], *, lo: float = 0.0,
+               hi: float = 100.0, on_negative: str = "reject"):
+    """Parse a percentage in [lo, hi].
+
+    Returns None when the value is blank, non numeric (warning added) or
+    rejected (negative with on_negative="reject", warning added). Values above
+    ``hi`` are clamped (warning added). Blank is NOT a warning: it means "unset".
+    """
+    if _is_blank(v):
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        warnings.append(f"{label}: valor no numérico ({v!r}) ignorado.")
+        return None
+    if x != x or x in (float("inf"), float("-inf")):
+        warnings.append(f"{label}: valor no finito ignorado.")
+        return None
+    if x < lo:
+        if on_negative == "reject":
+            warnings.append(f"{label}: {x:g}% es negativo, ignorado.")
+            return None
+        warnings.append(f"{label}: {x:g}% es negativo, se usa {lo:g}%.")
+        return lo
+    if x > hi:
+        warnings.append(f"{label}: {x:g}% supera {hi:g}%, se limita a {hi:g}%.")
+        return hi
+    return x
+
+
 def compute_rebalance(net_worth: float, class_breakdown: list[dict], cfg: dict) -> dict:
     """Build the rebalancing control panel.
 
@@ -35,13 +69,26 @@ def compute_rebalance(net_worth: float, class_breakdown: list[dict], cfg: dict) 
         class_breakdown: list of {name, value, pct, members:[{name,symbol,value}]}.
         cfg: target_portfolio config (see config.get_target_portfolio).
 
+    Validation: every percentage must lie in 0-100. Negative or non numeric
+    targets are rejected (the class simply has no target), values above 100 are
+    clamped; each correction adds a message to ``note``. ``max_asset_pct`` of
+    0/None/blank means "no single-asset limit" (it must not flag every asset);
+    the same 0-means-unset rule applies to class ``max`` limits.
+
     Returns a JSON-serialisable dict (see api_models.RebalanceResponse).
     """
-    targets_raw = cfg.get("targets", {}) if isinstance(cfg, dict) else {}
-    targets = {str(k): _num(v) for k, v in targets_raw.items() if str(v).strip() != ""}
-    band = _num(cfg.get("band_pct"), 0.0)
-    max_asset = cfg.get("max_asset_pct")
-    max_asset = _num(max_asset) if str(max_asset).strip() not in ("", "None") else None
+    cfg = cfg if isinstance(cfg, dict) else {}
+    warnings: list[str] = []
+    targets_raw = cfg.get("targets", {}) or {}
+    targets: dict[str, float] = {}
+    for k, v in targets_raw.items():
+        t = _parse_pct(v, f"Objetivo {k}", warnings)
+        if t is not None:
+            targets[str(k)] = t
+    band = _parse_pct(cfg.get("band_pct"), "Banda", warnings, on_negative="clamp") or 0.0
+    max_asset = _parse_pct(cfg.get("max_asset_pct"), "Peso máx. por activo", warnings)
+    if max_asset is not None and max_asset <= 0:
+        max_asset = None  # 0 = sin límite
     class_limits = cfg.get("class_limits", {}) or {}
     cash_buffer = cfg.get("cash_buffer", {}) or {}
 
@@ -59,21 +106,35 @@ def compute_rebalance(net_worth: float, class_breakdown: list[dict], cfg: dict) 
 
     rows: list[dict] = []
     for cls in ordered:
-        tgt_pct = targets.get(cls, 0.0)
-        tgt_eur = nw * tgt_pct / 100.0
         act_eur = actual_by_class.get(cls, 0.0)
         act_pct = (act_eur / nw * 100.0) if nw else 0.0
+
+        # A class the user never assigned a target to is NOT a 0% target — it is
+        # simply unconstrained. Report it, but never tell them to liquidate it.
+        if cls not in targets or not configured:
+            rows.append({
+                "asset_class": cls,
+                "has_target": False,
+                "target_pct": None,
+                "target_eur": None,
+                "actual_pct": round(act_pct, 2),
+                "actual_eur": round(act_eur, 2),
+                "drift_pct": None,
+                "band_pct": round(band, 2),
+                "within_band": True,
+                "action_eur": None,
+                "status": "sin_objetivo" if configured else "ok",
+            })
+            continue
+
+        tgt_pct = targets[cls]
+        tgt_eur = nw * tgt_pct / 100.0
         drift = act_pct - tgt_pct
-        within = abs(drift) <= band or not configured
+        within = abs(drift) <= band
         action_eur = tgt_eur - act_eur  # +buy / -sell
-        if not configured or within:
-            status = "ok"
-        elif action_eur > 0:
-            status = "comprar"
-        else:
-            status = "vender"
         rows.append({
             "asset_class": cls,
+            "has_target": True,
             "target_pct": round(tgt_pct, 2),
             "target_eur": round(tgt_eur, 2),
             "actual_pct": round(act_pct, 2),
@@ -82,7 +143,7 @@ def compute_rebalance(net_worth: float, class_breakdown: list[dict], cfg: dict) 
             "band_pct": round(band, 2),
             "within_band": within,
             "action_eur": round(action_eur, 2),
-            "status": status,
+            "status": "ok" if within else ("comprar" if action_eur > 0 else "vender"),
         })
 
     violations: list[dict] = []
@@ -111,28 +172,30 @@ def compute_rebalance(net_worth: float, class_breakdown: list[dict], cfg: dict) 
         if not isinstance(lim, dict):
             continue
         act_pct = (actual_by_class.get(cls, 0.0) / nw * 100.0) if nw else 0.0
-        lo = lim.get("min")
-        hi = lim.get("max")
-        if str(lo).strip() not in ("", "None") and act_pct < _num(lo) - 1e-9:
+        lo = _parse_pct(lim.get("min"), f"Mínimo {cls}", warnings)
+        hi = _parse_pct(lim.get("max"), f"Máximo {cls}", warnings)
+        if hi is not None and hi <= 0:
+            hi = None  # 0 = sin límite
+        if lo is not None and lo > 0 and act_pct < lo - 1e-9:
             violations.append({
                 "kind": "class_min",
                 "target": cls,
-                "message": f"{cls} está en {act_pct:.1f}% (mín {_num(lo):.0f}%) — comprar",
+                "message": f"{cls} está en {act_pct:.1f}% (mín {lo:.0f}%) — comprar",
                 "actual_pct": round(act_pct, 2),
-                "limit_pct": round(_num(lo), 2),
+                "limit_pct": round(lo, 2),
             })
-        if str(hi).strip() not in ("", "None") and act_pct > _num(hi) + 1e-9:
+        if hi is not None and act_pct > hi + 1e-9:
             violations.append({
                 "kind": "class_max",
                 "target": cls,
-                "message": f"{cls} está en {act_pct:.1f}% (máx {_num(hi):.0f}%) — vender",
+                "message": f"{cls} está en {act_pct:.1f}% (máx {hi:.0f}%) — vender",
                 "actual_pct": round(act_pct, 2),
-                "limit_pct": round(_num(hi), 2),
+                "limit_pct": round(hi, 2),
             })
 
     # ── Rule: cash buffer ──
-    cb_pct = _num(cash_buffer.get("pct"))
-    cb_amount = _num(cash_buffer.get("amount"))
+    cb_pct = _parse_pct(cash_buffer.get("pct"), "Colchón %", warnings, on_negative="clamp") or 0.0
+    cb_amount = max(_num(cash_buffer.get("amount")), 0.0)
     required_cash = max(nw * cb_pct / 100.0, cb_amount)
     if required_cash > 0:
         actual_cash = actual_by_class.get(CASH_CLASS, 0.0)
@@ -149,10 +212,14 @@ def compute_rebalance(net_worth: float, class_breakdown: list[dict], cfg: dict) 
                 "limit_pct": round((required_cash / nw * 100.0) if nw else 0.0, 2),
             })
 
+    # Targets need not add up to 100% — classes without a target absorb the rest.
+    # Only overshooting 100% is impossible to satisfy.
     target_sum = round(sum(targets.values()), 2)
-    notes: list[str] = []
-    if configured and abs(target_sum - 100.0) > 0.01:
-        notes.append(f"Los objetivos suman {target_sum:.0f}% (deberían sumar 100%).")
+    notes: list[str] = list(warnings)
+    if configured and target_sum > 100.0 + 0.01:
+        notes.append(
+            f"Los objetivos suman {target_sum:.0f}% (no pueden superar el 100%)."
+        )
 
     return {
         "configured": configured,
