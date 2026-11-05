@@ -9,6 +9,7 @@ import { Tax } from '@/pages/Tax'
 import { Import } from '@/pages/Import'
 import { Settings } from '@/pages/Settings'
 import { Objetivo } from '@/pages/Objetivo'
+import { Milestones } from '@/pages/Milestones'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,6 +26,7 @@ const router = createBrowserRouter([
       { path: 'operaciones', element: <Operations /> },
       { path: 'crypto', element: <Crypto /> },
       { path: 'objetivo', element: <Objetivo /> },
+      { path: 'hitos', element: <Milestones /> },
       { path: 'fiscalidad', element: <Tax /> },
       { path: 'importar', element: <Import /> },
       { path: 'ajustes', element: <Settings /> },

@@ -7,6 +7,7 @@ import {
   Upload,
   Settings,
   Target,
+  Flag,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -22,6 +23,7 @@ const NAV: NavItem[] = [
   { to: '/operaciones', label: 'Operaciones', icon: ListOrdered },
   { to: '/crypto', label: 'Crypto', icon: Bitcoin },
   { to: '/objetivo', label: 'Cartera objetivo', icon: Target },
+  { to: '/hitos', label: 'Hitos', icon: Flag },
   { to: '/fiscalidad', label: 'Fiscalidad', icon: Receipt },
   { to: '/importar', label: 'Importar', icon: Upload },
   { to: '/ajustes', label: 'Ajustes', icon: Settings },
