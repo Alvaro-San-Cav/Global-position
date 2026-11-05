@@ -11,6 +11,7 @@ import {
   avgMonthlyContribution,
   computeStage,
   fmtDuration,
+  impliedAnnualReturn,
   monthsToTarget,
   projectionCurve,
 } from '@/lib/milestones'
@@ -92,7 +93,17 @@ export function Milestones() {
         : avgMonthlyContribution(data?.portfolio_chart?.invested, as.mode === 'hist12' ? 12 : null),
     [as.mode, data?.portfolio_chart?.invested],
   )
-  const histReturn = data?.metrics?.twr_total_anual ?? data?.metrics?.cagr_total ?? null
+  const histReturn = useMemo(
+    () =>
+      as.mode === 'manual'
+        ? null
+        : impliedAnnualReturn(
+            data?.portfolio_chart?.value,
+            data?.portfolio_chart?.invested,
+            as.mode === 'hist12' ? 12 : null,
+          ),
+    [as.mode, data?.portfolio_chart?.value, data?.portfolio_chart?.invested],
+  )
   const useHistory = as.mode !== 'manual' && histMonthly !== null && histReturn !== null
 
   const monthly = useHistory ? Math.max(0, histMonthly) : parseAmount(as.monthly)
@@ -236,7 +247,7 @@ export function Milestones() {
                     )}
                   </div>
                   <div className="rounded-[var(--radius-card)] bg-card2 p-3">
-                    <div className="text-xs text-txt2">Rentabilidad anualizada (TWR)</div>
+                    <div className="text-xs text-txt2">Rentabilidad anualizada (del gráfico)</div>
                     <div className="text-lg font-semibold text-txt">{fmtPct(returnPct)}</div>
                   </div>
                 </div>
@@ -261,7 +272,8 @@ export function Milestones() {
 
               <p className="text-xs text-txt3">
                 La rentabilidad pasada no garantiza la futura. La aportación sale de la variación del
-                capital aportado en el gráfico de la cartera; la rentabilidad, del TWR anualizado.
+                capital aportado en el gráfico de la cartera; la rentabilidad, de la ganancia del mismo
+                periodo descontando aportaciones, anualizada.
               </p>
               {as.mode === 'manual' && !assumptionsOk && (
                 <p role="alert" className="text-xs text-amber">

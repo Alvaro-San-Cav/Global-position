@@ -156,6 +156,47 @@ export function avgMonthlyContribution(
   return (last.y - start.y) / months
 }
 
+/**
+ * Rentabilidad anualizada implícita en las series de valor y capital aportado
+ * (Dietz modificado con flujos a mitad de periodo), para que la proyección sea
+ * coherente con lo que se ve en el gráfico. null si hay <1 mes de datos.
+ */
+export function impliedAnnualReturn(
+  value: SeriesPoint[] | null | undefined,
+  invested: SeriesPoint[] | null | undefined,
+  windowMonths: number | null,
+): number | null {
+  const clean = (s: SeriesPoint[] | null | undefined) =>
+    (s ?? [])
+      .filter((p) => Number.isFinite(p.y) && !Number.isNaN(Date.parse(p.x)))
+      .sort((a, b) => Date.parse(a.x) - Date.parse(b.x))
+  const v = clean(value)
+  const inv = clean(invested)
+  if (v.length < 2 || inv.length < 2) return null
+  const endT = Date.parse(v[v.length - 1].x)
+  const at = (s: SeriesPoint[], t: number, fromEnd = false) => {
+    let pick = fromEnd ? s[s.length - 1] : s[0]
+    for (const p of s) if (Date.parse(p.x) <= t) pick = p
+    return pick
+  }
+  let startT = Date.parse(v[0].x)
+  if (windowMonths !== null) {
+    const cutoff = subMonths(new Date(endT), windowMonths).getTime()
+    const inside = v.filter((p) => Date.parse(p.x) <= cutoff)
+    if (inside.length) startT = Date.parse(inside[inside.length - 1].x)
+  }
+  const months = (endT - startT) / (1000 * 60 * 60 * 24 * 30.4375)
+  if (months < 1) return null
+  const v0 = at(v, startT).y
+  const v1 = v[v.length - 1].y
+  const flows = at(inv, endT, true).y - at(inv, startT).y
+  const base = v0 + flows / 2
+  if (!(base > 0)) return null
+  const r = (v1 - v0 - flows) / base
+  if (r <= -1) return null
+  return (Math.pow(1 + r, 12 / months) - 1) * 100
+}
+
 export interface ProjectionPoint {
   /** Fecha ISO (yyyy-MM-dd). */
   x: string

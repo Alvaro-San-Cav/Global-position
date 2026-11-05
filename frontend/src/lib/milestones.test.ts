@@ -3,6 +3,7 @@ import {
   avgMonthlyContribution,
   computeStage,
   fmtDuration,
+  impliedAnnualReturn,
   monthsToTarget,
   projectionCurve,
 } from './milestones'
@@ -75,6 +76,35 @@ describe('fmtDuration', () => {
     expect(fmtDuration(12)).toBe('1 año')
     expect(fmtDuration(27)).toBe('2 años y 3 meses')
     expect(fmtDuration(null)).toBe('más de 80 años')
+  })
+})
+
+describe('impliedAnnualReturn', () => {
+  const mk = (n: number, f: (i: number) => number) =>
+    Array.from({ length: n }, (_, i) => ({
+      x: new Date(Date.UTC(2024, 0, 1) + i * 30.4375 * 86400000).toISOString().slice(0, 10),
+      y: f(i),
+    }))
+
+  it('sin rentabilidad ni aportaciones -> 0', () => {
+    const v = mk(13, () => 1000)
+    expect(impliedAnnualReturn(v, v, null)).toBeCloseTo(0, 5)
+  })
+
+  it('las aportaciones no cuentan como rentabilidad', () => {
+    const inv = mk(13, (i) => 1000 + i * 100)
+    expect(impliedAnnualReturn(inv, inv, null)).toBeCloseTo(0, 5)
+  })
+
+  it('un 10 % de ganancia en un año ≈ 10 % anual', () => {
+    const v = mk(13, (i) => 1000 * (1 + (0.1 * i) / 12))
+    const inv = mk(13, () => 1000)
+    expect(impliedAnnualReturn(v, inv, null)).toBeCloseTo(10, 0)
+  })
+
+  it('pocos datos -> null', () => {
+    expect(impliedAnnualReturn(null, null, 12)).toBeNull()
+    expect(impliedAnnualReturn(mk(1, () => 1), mk(1, () => 1), 12)).toBeNull()
   })
 })
 
