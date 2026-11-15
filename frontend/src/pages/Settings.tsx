@@ -14,6 +14,7 @@ import { KeyValueEditor, type KVRow } from '@/components/settings/KeyValueEditor
 import { Toggle } from '@/components/settings/Toggle'
 import { AssetClassEditor } from '@/components/settings/AssetClassEditor'
 import { CashEditor } from '@/components/settings/CashEditor'
+import { LifeDeckEditor } from '@/components/settings/LifeDeckEditor'
 
 const SAVE_NOTE = 'Los cambios aplican al recalcular el dashboard.'
 
@@ -184,6 +185,7 @@ export function Settings() {
           <TabsTrigger value="efectivo">Efectivo</TabsTrigger>
           <TabsTrigger value="benchmark">Benchmark</TabsTrigger>
           <TabsTrigger value="ajustes">Ajustes precio/FX</TabsTrigger>
+          <TabsTrigger value="lifedeck">LifeDeck</TabsTrigger>
           <TabsTrigger value="json">JSON</TabsTrigger>
         </TabsList>
 
@@ -241,6 +243,11 @@ export function Settings() {
         {/* ── Clases de activo ────────────────────────────────────── */}
         <TabsContent value="clases">
           <AssetClassEditor />
+        </TabsContent>
+
+        {/* ── LifeDeck ────────────────────────────────────────────── */}
+        <TabsContent value="lifedeck">
+          <LifeDeckEditor />
         </TabsContent>
 
         {/* ── Efectivo ────────────────────────────────────────────── */}

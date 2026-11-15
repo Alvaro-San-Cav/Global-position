@@ -19,6 +19,7 @@ async function parseError(res: Response): Promise<string> {
       return data.detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join('; ')
     }
     if (typeof data?.error === 'string') return data.error
+    if (typeof data?.message === 'string') return data.message
     return res.statusText
   } catch {
     return res.statusText

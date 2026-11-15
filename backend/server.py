@@ -38,7 +38,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src import cash as cash_store
-from src import config, core, loaders, market_data, tax
+from src import config, core, lifedeck, loaders, market_data, tax
 from src import target as target_engine
 from src.api_models import (
     AssetClassesResponse,
@@ -284,6 +284,11 @@ def _get_dashboard(refresh: bool = False) -> dict:
             if version == _cache_version:        # nothing invalidated meanwhile
                 _dashboard_cache = result
                 _dashboard_cache_day = today
+        # Fresh build → push the net-worth summary to LifeDeck (no-op unless enabled; never blocks).
+        try:
+            lifedeck.push_in_background(result)
+        except Exception:
+            _log.exception("LifeDeck push scheduling failed")
         return result
 
 
@@ -597,6 +602,53 @@ def _build_dashboard(force_refresh: bool = False) -> dict:
 @app.get("/api/health", response_model=OkResponse)
 def api_health():
     return {"ok": True}
+
+
+# ── LifeDeck (resumen de patrimonio en el móvil) ─────────────────────────
+@app.get("/api/lifedeck")
+def api_lifedeck_get():
+    return lifedeck.public_settings()
+
+
+@app.post("/api/lifedeck")
+async def api_lifedeck_post(request: Request):
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Cuerpo inválido")
+    patch: dict = {}
+    if "enabled" in body:
+        patch["enabled"] = bool(body["enabled"])
+    if isinstance(body.get("url"), str):
+        url = body["url"].strip().rstrip("/")
+        if url and not re.match(r"^https?://", url):
+            raise HTTPException(400, "La URL debe empezar por https://")
+        patch["url"] = url
+    # token vacío = no cambiarlo
+    if isinstance(body.get("token"), str) and body["token"].strip():
+        patch["token"] = body["token"].strip()
+    lifedeck.save_settings(patch)
+    return lifedeck.public_settings()
+
+
+@app.post("/api/lifedeck/test")
+def api_lifedeck_test():
+    ok, msg = lifedeck.test_connection()
+    return {"ok": ok, "message": msg}
+
+
+@app.post("/api/lifedeck/push")
+def api_lifedeck_push():
+    try:
+        dash = _get_dashboard()
+        if "error" in dash:
+            return JSONResponse({"ok": False, "message": dash["error"]}, status_code=409)
+        res = lifedeck.push(dash)
+        return {"ok": True, "message": "Patrimonio subido a LifeDeck.", "last_push_at": res["last_push_at"]}
+    except lifedeck.LifeDeckError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=502)
+    except Exception as e:
+        _log_exception(e, "lifedeck push")
+        return JSONResponse({"ok": False, "message": GENERIC_ERROR}, status_code=500)
 
 
 @app.get("/api/dashboard", response_model=DashboardResponse)
