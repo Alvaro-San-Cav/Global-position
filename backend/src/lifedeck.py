@@ -73,6 +73,9 @@ def public_settings() -> dict[str, Any]:
         "has_token": bool(s.get("token")),
         "last_push_at": s.get("last_push_at"),
         "last_error": s.get("last_error"),
+        "auto_minutes": int(s.get("auto_minutes") or 30),
+        "last_auto_at": s.get("last_auto_at"),
+        "last_auto_error": s.get("last_auto_error") or None,
     }
 
 

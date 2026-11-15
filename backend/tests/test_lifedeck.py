@@ -57,7 +57,10 @@ def test_settings_never_expose_token(tmp_path, monkeypatch):
     monkeypatch.setattr(lifedeck, "CONFIG_FILE", str(tmp_path / "lifedeck.json"))
     lifedeck.save_settings({"url": "https://example.test", "token": "secret", "enabled": True})
     pub = lifedeck.public_settings()
-    assert pub == {"enabled": True, "url": "https://example.test", "has_token": True, "last_push_at": None, "last_error": None}
+    assert pub == {
+        "enabled": True, "url": "https://example.test", "has_token": True, "last_push_at": None, "last_error": None,
+        "auto_minutes": 30, "last_auto_at": None, "last_auto_error": None,
+    }
     assert "secret" not in json.dumps(pub)
 
 

@@ -38,7 +38,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from src import cash as cash_store
-from src import config, core, lifedeck, loaders, market_data, tax
+from src import config, core, lifedeck, lifedeck_auto, loaders, market_data, tax
 from src import target as target_engine
 from src.api_models import (
     AssetClassesResponse,
@@ -605,9 +605,39 @@ def api_health():
 
 
 # ── LifeDeck (resumen de patrimonio en el móvil) ─────────────────────────
+def _lifedeck_public() -> dict:
+    data = lifedeck.public_settings()
+    data["auto_supported"] = lifedeck_auto.supported()
+    data["auto_enabled"] = lifedeck_auto.is_installed()
+    return data
+
+
 @app.get("/api/lifedeck")
 def api_lifedeck_get():
-    return lifedeck.public_settings()
+    return _lifedeck_public()
+
+
+@app.post("/api/lifedeck/auto")
+async def api_lifedeck_auto(request: Request):
+    """Activa/desactiva la tarea programada que recalcula y sube a LifeDeck sin abrir la app."""
+    body = await request.json()
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        raise HTTPException(400, "Cuerpo inválido")
+    try:
+        if body["enabled"]:
+            s = lifedeck.load_settings()
+            if not (s.get("url") and s.get("token")):
+                raise HTTPException(409, "Guarda antes la URL y el token de LifeDeck.")
+            minutes = int(body.get("minutes") or s.get("auto_minutes") or 30)
+            if minutes not in lifedeck_auto.INTERVALS:
+                raise HTTPException(400, "Intervalo no permitido")
+            lifedeck_auto.install(minutes)
+            lifedeck.save_settings({"auto_minutes": minutes})
+        else:
+            lifedeck_auto.uninstall()
+    except lifedeck_auto.AutoError as exc:
+        return JSONResponse({"message": str(exc)}, status_code=502)
+    return _lifedeck_public()
 
 
 @app.post("/api/lifedeck")
@@ -627,7 +657,7 @@ async def api_lifedeck_post(request: Request):
     if isinstance(body.get("token"), str) and body["token"].strip():
         patch["token"] = body["token"].strip()
     lifedeck.save_settings(patch)
-    return lifedeck.public_settings()
+    return _lifedeck_public()
 
 
 @app.post("/api/lifedeck/test")
