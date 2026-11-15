@@ -83,6 +83,12 @@ export function LifeDeckEditor() {
           reducida) para verlo en el móvil. No se envían operaciones. Usa el mismo token que PersAcc: LifeDeck › Ajustes ›
           Conexión con PersAcc.
         </p>
+        {q.isError && (
+          <p role="alert" className="text-sm text-red">
+            El servidor no responde a /api/lifedeck: cierra Global Position del todo (o ejecuta launch-app.ps1 -Stop) y
+            vuelve a abrirlo para cargar la versión nueva.
+          </p>
+        )}
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="ld-url">URL de LifeDeck</Label>
