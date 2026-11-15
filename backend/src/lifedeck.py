@@ -29,6 +29,7 @@ CONFIG_FILE = os.path.join(config.PROCESSING_DIR, "lifedeck.json")
 TIMEOUT = 15
 MAX_POINTS = 180
 MAX_SLICES = 12
+MAX_POSITIONS = 150
 
 _ERRORS = {
     "unauthorized": "Token no válido. Genera uno en LifeDeck › Ajustes › Conexión con PersAcc.",
@@ -158,6 +159,14 @@ def build_payload(dash: dict) -> dict:
             continue
         classes.append({"name": str(c["name"])[:80], "value": v, "pct": _num(c.get("pct"))})
 
+    positions = []
+    for a in (dash.get("composition_full") or [])[:MAX_POSITIONS]:
+        v = _num(a.get("value"))
+        if v is None or v <= 0 or not a.get("name"):
+            continue
+        positions.append({"name": str(a["name"])[:80], "value": v,
+                          "pct": round(v / portfolio * 100, 2) if portfolio else None})
+
     chart = dash.get("portfolio_chart") or {}
     invested = {p.get("x"): _num(p.get("y")) for p in (chart.get("invested") or [])}
     series = [
@@ -179,6 +188,7 @@ def build_payload(dash: dict) -> dict:
         "twr_annual_pct": _num(m.get("twr_total_anual")),
         "top": top,
         "classes": classes,
+        "positions": positions,
         "series": _downsample(series),
     }
 

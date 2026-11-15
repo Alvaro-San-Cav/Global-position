@@ -70,3 +70,17 @@ def test_push_in_background_noop_when_disabled(tmp_path, monkeypatch):
     monkeypatch.setattr(lifedeck, "push", lambda d: called.append(d))
     lifedeck.push_in_background(DASH)
     assert called == []
+
+
+def test_build_payload_sends_all_positions_without_symbols():
+    dash = {**DASH, "composition_full": [
+        {"name": "Vanguard Global", "symbol": "VWCE", "value": 60000.0},
+        {"name": "Apple", "symbol": "AAPL", "value": 1500.0},
+        {"name": "Vacía", "symbol": "X", "value": 0},
+    ]}
+    p = lifedeck.build_payload(dash)
+    assert p["positions"] == [
+        {"name": "Vanguard Global", "value": 60000.0, "pct": 60.0},
+        {"name": "Apple", "value": 1500.0, "pct": 1.5},
+    ]
+    assert "AAPL" not in json.dumps(p["positions"])
