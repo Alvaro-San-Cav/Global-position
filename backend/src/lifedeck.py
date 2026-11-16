@@ -12,16 +12,20 @@ La configuración (URL, token) vive en processing/lifedeck.json, que está en .g
 """
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
+import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from src import config
+from src.file_lock import interprocess_lock
 
 _log = logging.getLogger(__name__)
 
@@ -40,28 +44,80 @@ _lock = threading.Lock()
 
 
 class LifeDeckError(Exception):
-    pass
+    """Error comprensible para la UI. `transient`: fallo de red/servidor que merece reintento."""
+
+    def __init__(self, message: str, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 # ── configuración ───────────────────────────────────────────────────────────
-def load_settings() -> dict[str, Any]:
+# El servidor y la tarea en segundo plano (otro proceso) escriben este fichero. En Windows, abrirlo
+# mientras el otro hace os.replace (o al revés) da PermissionError momentáneo: se reintenta.
+_IO_RETRIES = 8
+_IO_RETRY_DELAY = 0.05
+
+
+def _read_settings() -> dict[str, Any]:
+    """Lee la configuración. {} solo si el fichero no existe; otros errores se propagan."""
+    for attempt in range(_IO_RETRIES):
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("lifedeck.json no contiene un objeto")
+            return data
+        except FileNotFoundError:
+            return {}
+        except PermissionError:
+            if attempt == _IO_RETRIES - 1:
+                raise
+            time.sleep(_IO_RETRY_DELAY * (attempt + 1))
+    return {}  # pragma: no cover
+
+
+def load_settings(strict: bool = False) -> dict[str, Any]:
+    """Configuración actual. Con strict=False (UI) un fichero ilegible se ve como vacío;
+    con strict=True se propaga el error para no actuar sobre datos que no se han podido leer."""
     try:
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        return _read_settings()
     except (OSError, ValueError):
+        if strict:
+            raise
+        _log.warning("No se pudo leer %s", CONFIG_FILE, exc_info=True)
         return {}
 
 
+def _write_settings(data: dict[str, Any]) -> None:
+    directory = os.path.dirname(CONFIG_FILE)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="lifedeck.json.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        for attempt in range(_IO_RETRIES):
+            try:
+                os.replace(tmp, CONFIG_FILE)
+                break
+            except PermissionError:
+                if attempt == _IO_RETRIES - 1:
+                    raise
+                time.sleep(_IO_RETRY_DELAY * (attempt + 1))
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_settings(patch: dict[str, Any]) -> dict[str, Any]:
-    with _lock:
-        cur = load_settings()
+    """Lee-modifica-escribe bajo cerrojo (hilos y procesos). Si la lectura falla NO escribe:
+    reescribir solo el parche borraría la URL y el token guardados."""
+    with _lock, interprocess_lock(CONFIG_FILE):
+        cur = _read_settings()
         cur.update({k: v for k, v in patch.items() if v is not None})
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        tmp = CONFIG_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cur, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, CONFIG_FILE)
+        _write_settings(cur)
         return cur
 
 
@@ -82,7 +138,11 @@ def public_settings() -> dict[str, Any]:
 
 # ── cliente HTTP ────────────────────────────────────────────────────────────
 def _request(method: str, op: str, body: dict | None = None, s: dict | None = None) -> dict:
-    s = s if s is not None else load_settings()
+    if s is None:
+        try:
+            s = _read_settings()
+        except (OSError, ValueError) as exc:
+            raise LifeDeckError(f"No se pudo leer la configuración de LifeDeck: {exc}", transient=True) from None
     url = str(s.get("url") or "").strip().rstrip("/")
     token = str(s.get("token") or "").strip()
     if not url:
@@ -106,9 +166,11 @@ def _request(method: str, op: str, body: dict | None = None, s: dict | None = No
             code = json.loads(exc.read().decode("utf-8")).get("error", "")
         except Exception:
             pass
-        raise LifeDeckError(_ERRORS.get(code, f"LifeDeck respondió {exc.code} ({code or 'error'}).")) from None
+        raise LifeDeckError(_ERRORS.get(code, f"LifeDeck respondió {exc.code} ({code or 'error'})."),
+                            transient=exc.code >= 500 or exc.code == 429) from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise LifeDeckError(f"No se pudo conectar con LifeDeck: {getattr(exc, 'reason', exc)}") from None
+        raise LifeDeckError(f"No se pudo conectar con LifeDeck: {getattr(exc, 'reason', exc)}",
+                            transient=True) from None
 
 
 def test_connection() -> tuple[bool, str]:
@@ -137,8 +199,38 @@ def _downsample(points: list[dict], n: int = MAX_POINTS) -> list[dict]:
     return out
 
 
-def build_payload(dash: dict) -> dict:
-    """Convierte la respuesta de /api/dashboard en el resumen que acepta LifeDeck."""
+def latest_price_date(path: str | None = None) -> str | None:
+    """Día (YYYY-MM-DD) de la cotización real más reciente en la caché de precios.
+
+    La caché solo guarda cotizaciones descargadas (el relleno hasta hoy se hace al leerla), así que
+    si Yahoo falla esta fecha se queda atrás aunque el panel diga «hoy». None si no hay caché."""
+    path = path or config.PRICES_CACHE_FILE
+    for attempt in range(_IO_RETRIES):
+        try:
+            last = None
+            with open(path, encoding="utf-8", newline="") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # cabecera
+                for row in reader:
+                    if row and any(c.strip() for c in row[1:]):
+                        last = row[0]
+            if not last:
+                return None
+            return date.fromisoformat(last.strip()[:10]).isoformat()
+        except PermissionError:
+            if attempt == _IO_RETRIES - 1:
+                return None
+            time.sleep(_IO_RETRY_DELAY * (attempt + 1))
+        except (OSError, ValueError, csv.Error):
+            return None
+    return None  # pragma: no cover
+
+
+def build_payload(dash: dict, prices_as_of: str | None = None) -> dict:
+    """Convierte la respuesta de /api/dashboard en el resumen que acepta LifeDeck.
+
+    `prices_as_of`: día de la última cotización real. Si es anterior a la fecha del panel (que
+    siempre rellena hasta hoy), as_of usa esa fecha para no presentar precios viejos como de hoy."""
     m = dash.get("metrics") or {}
     portfolio = _num(dash.get("portfolio_total_value"))
     net = _num(dash.get("net_worth"))
@@ -176,8 +268,11 @@ def build_payload(dash: dict) -> dict:
     ]
 
     as_of = str(m.get("fecha_actual") or (series[-1]["d"] if series else datetime.now().strftime("%Y-%m-%d")))[:10]
+    if prices_as_of and prices_as_of[:10] < as_of:
+        as_of = prices_as_of[:10]
     return {
         "as_of": as_of,
+        "prices_as_of": prices_as_of[:10] if prices_as_of else None,
         "net_worth": net,
         "portfolio_value": portfolio,
         "cash": _num(dash.get("cash_total")),
@@ -193,16 +288,28 @@ def build_payload(dash: dict) -> dict:
     }
 
 
-def push(dash: dict) -> dict:
-    """Sube el resumen y guarda la hora/error en la configuración."""
+def _record(patch: dict[str, Any]) -> None:
+    """Guarda estado (hora/error) sin que un fallo de disco cambie el resultado de la subida."""
     try:
-        _request("POST", "portfolio", build_payload(dash))
+        save_settings(patch)
+    except (OSError, ValueError):
+        _log.warning("No se pudo guardar el estado de LifeDeck %s", list(patch), exc_info=True)
+
+
+def push(dash: dict) -> dict:
+    """Sube el resumen y guarda la hora/error en la configuración.
+
+    Devuelve {ok, last_push_at, as_of, prices_as_of}. Si la subida fue bien pero no se puede
+    anotar en lifedeck.json, sigue contando como éxito (el móvil ya tiene los datos)."""
+    try:
+        payload = build_payload(dash, latest_price_date())
+        _request("POST", "portfolio", payload)
     except LifeDeckError as exc:
-        save_settings({"last_error": str(exc)})
+        _record({"last_error": str(exc)})
         raise
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    save_settings({"last_push_at": now, "last_error": ""})
-    return {"ok": True, "last_push_at": now}
+    _record({"last_push_at": now, "last_error": ""})
+    return {"ok": True, "last_push_at": now, "as_of": payload["as_of"], "prices_as_of": payload["prices_as_of"]}
 
 
 def push_in_background(dash: dict) -> None:

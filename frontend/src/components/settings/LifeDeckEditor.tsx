@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { apiGet, apiPost } from '@/api/client'
 import { Toggle } from './Toggle'
+import { autoLooksStopped } from './lifedeckStatus'
 
 interface LifeDeckSettings {
   enabled: boolean
@@ -17,6 +18,8 @@ interface LifeDeckSettings {
   last_error: string | null
   auto_supported?: boolean
   auto_enabled?: boolean
+  /** La tarea existe pero apunta a un Python/script que ya no está (venv recreado o movido). */
+  auto_broken?: boolean
   auto_minutes?: number
   last_auto_at?: string | null
   last_auto_error?: string | null
@@ -43,22 +46,36 @@ export function LifeDeckEditor() {
   const q = useQuery<LifeDeckSettings>({ queryKey: KEY, queryFn: () => apiGet('/api/lifedeck') })
   const [url, setUrl] = useState('')
   const [token, setToken] = useState('')
-  const [enabled, setEnabled] = useState(false)
+  // Intervalo elegido con la tarea apagada: estado local para que un refetch no lo devuelva a 30.
+  const [pickedMinutes, setPickedMinutes] = useState<number | null>(null)
 
   useEffect(() => {
     if (!q.data) return
     setUrl(q.data.url || 'https://life-deck-one.vercel.app')
-    setEnabled(q.data.enabled)
   }, [q.data])
 
   const save = useMutation({
-    mutationFn: () => apiPost<LifeDeckSettings>('/api/lifedeck', { url, token, enabled }),
+    mutationFn: () => apiPost<LifeDeckSettings>('/api/lifedeck', { url, token }),
     onSuccess: (d) => {
       qc.setQueryData(KEY, d)
       setToken('')
       toast.success('Ajustes de LifeDeck guardados')
     },
     onError: (e: Error) => toast.error('No se pudo guardar', { description: e.message }),
+  })
+  // El interruptor de la cabecera se guarda al momento, igual que el de segundo plano.
+  const toggleEnabled = useMutation({
+    mutationFn: (v: boolean) => apiPost<LifeDeckSettings>('/api/lifedeck', { enabled: v }),
+    onMutate: (v) => {
+      const prev = qc.getQueryData<LifeDeckSettings>(KEY)
+      qc.setQueryData<LifeDeckSettings>(KEY, (old) => (old ? { ...old, enabled: v } : old))
+      return { prev }
+    },
+    onSuccess: (d) => qc.setQueryData(KEY, d),
+    onError: (e: Error, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(KEY, ctx.prev)
+      toast.error('No se pudo cambiar', { description: e.message })
+    },
   })
   const test = useMutation({
     mutationFn: () => apiPost<Result>('/api/lifedeck/test'),
@@ -76,6 +93,7 @@ export function LifeDeckEditor() {
     mutationFn: (body: { enabled: boolean; minutes?: number }) => apiPost<LifeDeckSettings>('/api/lifedeck/auto', body),
     onSuccess: (d, body) => {
       qc.setQueryData(KEY, d)
+      setPickedMinutes(null)
       toast.success(
         body.enabled
           ? `Actualizando en segundo plano cada ${body.minutes ?? d.auto_minutes} min (aunque cierres Global Position)`
@@ -86,8 +104,10 @@ export function LifeDeckEditor() {
   })
 
   const s = q.data
-  const minutes = s?.auto_minutes ?? 30
-  const dirty = Boolean(s && (url !== s.url || enabled !== s.enabled || token.trim()))
+  const minutes = pickedMinutes ?? s?.auto_minutes ?? 30
+  const dirty = Boolean(s && (url !== s.url || token.trim()))
+  const autoLocked = auto.isPending || !s?.has_token
+  const stopped = Boolean(s?.auto_enabled && autoLooksStopped(s.last_auto_at, s.auto_minutes ?? 30))
 
   return (
     <Card>
@@ -95,7 +115,13 @@ export function LifeDeckEditor() {
         <CardTitle>LifeDeck</CardTitle>
         <div className="flex items-center gap-2 text-sm text-txt2">
           Subir tras cada análisis
-          <Toggle checked={enabled} onChange={setEnabled} label="Subir automáticamente a LifeDeck" />
+          <fieldset disabled={!s || toggleEnabled.isPending} className="inline-flex disabled:opacity-60">
+            <Toggle
+              checked={Boolean(s?.enabled)}
+              onChange={(v) => toggleEnabled.mutate(v)}
+              label="Subir automáticamente a LifeDeck"
+            />
+          </fieldset>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -158,8 +184,8 @@ export function LifeDeckEditor() {
                   disabled={auto.isPending}
                   onChange={(e) => {
                     const m = Number(e.target.value)
+                    setPickedMinutes(m)
                     if (s?.auto_enabled) auto.mutate({ enabled: true, minutes: m })
-                    else qc.setQueryData<LifeDeckSettings>(KEY, (old) => (old ? { ...old, auto_minutes: m } : old))
                   }}
                 >
                   {INTERVALS.map((m) => (
@@ -168,11 +194,17 @@ export function LifeDeckEditor() {
                     </option>
                   ))}
                 </select>
-                <Toggle
-                  checked={Boolean(s?.auto_enabled)}
-                  onChange={(v) => auto.mutate(v ? { enabled: true, minutes } : { enabled: false })}
-                  label="Actualizar en segundo plano"
-                />
+                {/* fieldset deshabilita el botón: sin doble clic durante schtasks ni 409 sin token */}
+                <fieldset
+                  disabled={auto.isPending || (!s?.auto_enabled && autoLocked)}
+                  className="inline-flex disabled:opacity-60"
+                >
+                  <Toggle
+                    checked={Boolean(s?.auto_enabled)}
+                    onChange={(v) => auto.mutate(v ? { enabled: true, minutes } : { enabled: false })}
+                    label="Actualizar en segundo plano"
+                  />
+                </fieldset>
               </div>
             </div>
             <p className="text-xs text-txt2">
@@ -184,6 +216,17 @@ export function LifeDeckEditor() {
               <p className="text-xs text-txt2">
                 Última ejecución: {when(s.last_auto_at ?? null)}
                 {s.last_auto_error ? <span className="ml-2 text-red">· {s.last_auto_error}</span> : null}
+              </p>
+            )}
+            {s?.auto_enabled && s.auto_broken && (
+              <p role="alert" className="text-xs text-red">
+                La tarea apunta a un Python que ya no existe (¿venv recreado?): desactívala y vuelve a activarla.
+              </p>
+            )}
+            {stopped && !s?.auto_broken && (
+              <p role="alert" className="text-xs text-red">
+                Sin ejecutar desde {when(s?.last_auto_at ?? null)}: revisa que el PC no esté suspendido o vuelve a
+                activar la tarea.
               </p>
             )}
             {!s?.has_token && <p className="text-xs text-txt2">Guarda antes la URL y el token.</p>}

@@ -4,6 +4,7 @@ market_data.py – Ticker resolution, price download and FX rates.
 Uses yfinance exclusively (no Selenium/browser required).
 """
 
+import tempfile
 import threading
 import time
 
@@ -11,10 +12,13 @@ import pandas as pd
 import yfinance as yf
 
 from . import config
+from .file_lock import interprocess_lock
 
 # Cache files are read/written from FastAPI's sync threadpool, so concurrent
 # requests could interleave writes and produce header/value misalignment.
 _CACHE_LOCK = threading.Lock()
+_IO_RETRIES = 8
+_IO_RETRY_DELAY = 0.05
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -105,13 +109,20 @@ def _load_cache(path: str) -> pd.DataFrame | None:
     import os
     if not os.path.exists(path):
         return None
-    try:
-        with _CACHE_LOCK:
-            df = pd.read_csv(path, index_col=0, parse_dates=True)
-        df.index = pd.to_datetime(df.index)
-        return df
-    except Exception:
-        return None
+    for attempt in range(_IO_RETRIES):
+        try:
+            with _CACHE_LOCK:
+                df = pd.read_csv(path, index_col=0, parse_dates=True)
+            df.index = pd.to_datetime(df.index)
+            return df
+        except PermissionError:
+            # Another process is replacing the file right now (Windows).
+            if attempt == _IO_RETRIES - 1:
+                return None
+            time.sleep(_IO_RETRY_DELAY * (attempt + 1))
+        except Exception:
+            return None
+    return None
 
 
 def _save_cache(df: pd.DataFrame, path: str, merge: bool = True) -> None:
@@ -130,7 +141,9 @@ def _save_cache(df: pd.DataFrame, path: str, merge: bool = True) -> None:
     """
     import os
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    with _CACHE_LOCK:
+    # Thread lock (server threadpool) + file lock (server vs. LifeDeck job):
+    # the read-merge-write must not interleave or one side's update is lost.
+    with _CACHE_LOCK, interprocess_lock(path):
         out = df
         if merge:
             try:
@@ -143,9 +156,28 @@ def _save_cache(df: pd.DataFrame, path: str, merge: bool = True) -> None:
         out = out.sort_index()
         out = out.reindex(sorted(out.columns), axis=1)
 
-        tmp = f"{path}.tmp"
-        out.to_csv(tmp)
-        os.replace(tmp, path)
+        # Unique temp name (the scheduled LifeDeck job is another process that
+        # writes the same cache) + os.replace with retries: on Windows the
+        # replace fails while another process has the target open for reading.
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.',
+                                   prefix=os.path.basename(path) + ".", suffix=".tmp")
+        os.close(fd)
+        try:
+            out.to_csv(tmp)
+            for attempt in range(_IO_RETRIES):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    if attempt == _IO_RETRIES - 1:
+                        raise
+                    time.sleep(_IO_RETRY_DELAY * (attempt + 1))
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def _apply_price_adjustments(data: pd.DataFrame) -> pd.DataFrame:

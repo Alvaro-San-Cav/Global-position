@@ -32,6 +32,7 @@ import yfinance as yf
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -608,12 +609,36 @@ def api_health():
 def _lifedeck_public() -> dict:
     data = lifedeck.public_settings()
     data["auto_supported"] = lifedeck_auto.supported()
-    data["auto_enabled"] = lifedeck_auto.is_installed()
+    st = lifedeck_auto.status()  # cacheado: no lanza schtasks.exe en cada GET
+    data["auto_enabled"] = st["installed"]
+    data["auto_broken"] = st["broken"]
     return data
 
 
 @app.get("/api/lifedeck")
 def api_lifedeck_get():
+    return _lifedeck_public()
+
+
+def _lifedeck_auto_apply(body: dict) -> dict:
+    """schtasks es bloqueante: se ejecuta en el threadpool, nunca en el event loop."""
+    if body["enabled"]:
+        try:
+            s = lifedeck.load_settings(strict=True)
+        except (OSError, ValueError):
+            raise HTTPException(503, "No se pudo leer la configuración de LifeDeck; inténtalo de nuevo.")
+        if not (s.get("url") and s.get("token")):
+            raise HTTPException(409, "Guarda antes la URL y el token de LifeDeck.")
+        try:
+            minutes = int(body.get("minutes") or s.get("auto_minutes") or 30)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Intervalo no permitido")
+        if minutes not in lifedeck_auto.INTERVALS:
+            raise HTTPException(400, "Intervalo no permitido")
+        lifedeck_auto.install(minutes)
+        lifedeck.save_settings({"auto_minutes": minutes})
+    else:
+        lifedeck_auto.uninstall()
     return _lifedeck_public()
 
 
@@ -624,20 +649,9 @@ async def api_lifedeck_auto(request: Request):
     if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
         raise HTTPException(400, "Cuerpo inválido")
     try:
-        if body["enabled"]:
-            s = lifedeck.load_settings()
-            if not (s.get("url") and s.get("token")):
-                raise HTTPException(409, "Guarda antes la URL y el token de LifeDeck.")
-            minutes = int(body.get("minutes") or s.get("auto_minutes") or 30)
-            if minutes not in lifedeck_auto.INTERVALS:
-                raise HTTPException(400, "Intervalo no permitido")
-            lifedeck_auto.install(minutes)
-            lifedeck.save_settings({"auto_minutes": minutes})
-        else:
-            lifedeck_auto.uninstall()
+        return await run_in_threadpool(_lifedeck_auto_apply, body)
     except lifedeck_auto.AutoError as exc:
         return JSONResponse({"message": str(exc)}, status_code=502)
-    return _lifedeck_public()
 
 
 @app.post("/api/lifedeck")
@@ -656,8 +670,16 @@ async def api_lifedeck_post(request: Request):
     # token vacío = no cambiarlo
     if isinstance(body.get("token"), str) and body["token"].strip():
         patch["token"] = body["token"].strip()
-    lifedeck.save_settings(patch)
-    return _lifedeck_public()
+
+    def _apply() -> dict:
+        try:
+            lifedeck.save_settings(patch)
+        except (OSError, ValueError):
+            _log.exception("lifedeck settings save failed")
+            raise HTTPException(503, "No se pudo guardar la configuración de LifeDeck; inténtalo de nuevo.")
+        return _lifedeck_public()
+
+    return await run_in_threadpool(_apply)
 
 
 @app.post("/api/lifedeck/test")
@@ -673,7 +695,11 @@ def api_lifedeck_push():
         if "error" in dash:
             return JSONResponse({"ok": False, "message": dash["error"]}, status_code=409)
         res = lifedeck.push(dash)
-        return {"ok": True, "message": "Patrimonio subido a LifeDeck.", "last_push_at": res["last_push_at"]}
+        msg = "Patrimonio subido a LifeDeck."
+        pa = res.get("prices_as_of")
+        if pa and pa < datetime.now().strftime("%Y-%m-%d"):
+            msg = f"Patrimonio subido a LifeDeck (precios del {pa[8:10]}/{pa[5:7]})."
+        return {"ok": True, "message": msg, "last_push_at": res["last_push_at"]}
     except lifedeck.LifeDeckError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=502)
     except Exception as e:

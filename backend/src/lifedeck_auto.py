@@ -14,11 +14,14 @@ La tarea se define en XML para poder:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from datetime import datetime
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, unescape
 
 TASK_NAME = "GlobalPosition LifeDeck"
 INTERVALS = (15, 30, 60, 120)
@@ -105,16 +108,63 @@ def _fail(res: subprocess.CompletedProcess, what: str) -> AutoError:
     return AutoError(f"No se pudo {what} la tarea programada" + (f": {detail[-1]}" if detail else "."))
 
 
-def is_installed() -> bool:
+_STATUS_TTL = 15.0
+_status_cache: tuple[float, dict] | None = None
+_status_lock = threading.Lock()
+
+
+def _invalidate_status() -> None:
+    global _status_cache
+    with _status_lock:
+        _status_cache = None
+
+
+def _tag(xml: str, name: str) -> str | None:
+    m = re.search(rf"<{name}>(.*?)</{name}>", xml, re.S)
+    return unescape(m.group(1).strip()) if m else None
+
+
+def parse_status(xml: str) -> dict:
+    """De `schtasks /Query /XML`: ruta del Python y del script de la tarea, y si siguen existiendo.
+
+    Si el venv se recrea o se mueve, Windows no llega a ejecutar el job (ni deja error en
+    lifedeck.json): `broken` lo detecta para que la UI pida reactivar la tarea."""
+    command = _tag(xml, "Command")
+    args = _tag(xml, "Arguments")
+    script = args.strip().strip('"') if args else None
+    missing = [p for p in (command, script) if p and not os.path.exists(p)]
+    return {"command": command, "script": script, "broken": bool(missing)}
+
+
+def status(force: bool = False) -> dict:
+    """{installed, broken}. Cacheado unos segundos: cada GET /api/lifedeck lanzaría schtasks.exe."""
+    global _status_cache
     if not supported():
-        return False
-    return _schtasks("/Query", "/TN", TASK_NAME).returncode == 0
+        return {"installed": False, "broken": False}
+    now = time.monotonic()
+    with _status_lock:
+        if not force and _status_cache and now - _status_cache[0] < _STATUS_TTL:
+            return dict(_status_cache[1])
+    res = _schtasks("/Query", "/TN", TASK_NAME, "/XML")
+    if res.returncode != 0:
+        out = {"installed": False, "broken": False}
+    else:
+        info = parse_status(res.stdout or "")
+        out = {"installed": True, "broken": info["broken"]}
+    with _status_lock:
+        _status_cache = (time.monotonic(), out)
+    return dict(out)
+
+
+def is_installed() -> bool:
+    return status()["installed"]
 
 
 def install(minutes: int, run_now: bool = True) -> None:
     if not supported():
         raise AutoError("La actualización en segundo plano solo está disponible en Windows.")
     xml = task_xml(minutes, pythonw_path())
+    _invalidate_status()
     fd, path = tempfile.mkstemp(suffix=".xml")
     try:
         with os.fdopen(fd, "w", encoding="utf-16") as f:
@@ -127,13 +177,15 @@ def install(minutes: int, run_now: bool = True) -> None:
             os.remove(path)
         except OSError:
             pass
+    _invalidate_status()
     if run_now:
         _schtasks("/Run", "/TN", TASK_NAME)  # primera ejecución ya; si falla, la siguiente llegará sola
 
 
 def uninstall() -> None:
-    if not supported() or not is_installed():
+    if not supported() or not status(force=True)["installed"]:
         return
     res = _schtasks("/Delete", "/F", "/TN", TASK_NAME)
+    _invalidate_status()
     if res.returncode != 0:
         raise _fail(res, "borrar")
